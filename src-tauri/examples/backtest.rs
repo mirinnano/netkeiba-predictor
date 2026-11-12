@@ -521,6 +521,9 @@ fn main() {
                 lm
             } else {
                 let b = fit_cols(&tr, cols.as_ref(), l2 * 0.25);
+                if vi == 2 && std::env::var("SHOW_DELTA").is_ok() {
+                    eprintln!("区間 {}: γ={:.3} δ={:.3}", k, b[0], b[1]);
+                }
                 logloss(&te, |r: &[Runner]| softmax(&r.iter().map(|x| cols(x).iter().zip(&b).map(|(a, c)| a * c).sum()).collect::<Vec<_>>()))
             };
             resid_sum[vi] += v;
