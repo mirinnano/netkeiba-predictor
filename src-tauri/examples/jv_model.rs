@@ -10,13 +10,14 @@ use netkeiba_predictor_lib::jvdata::{JvRace, JvRunner};
 use std::collections::HashMap;
 use std::io::BufRead;
 
-const NAMES: [&str; 30] = [
+const NAMES: [&str; 38] = [
     "指数最高3", "指数平均3", "指数前走", "上がり順位", "展開不利", "4角から挽回", "着差", "着順率", "過去人気",
     "人気以上", "クラス変化", "騎手3着内", "調教師3着内", "騎手勝率", "間隔", "距離変更", "芝ダ替わり", "斤量差",
     "馬体重増減", "馬体重", "馬齢", "出走数", "ブリンカー", "初ブリンカー", "馬番位置", "脚質", "同場3着内", "同距離3着内",
     "乗り替わり", "騎手の格上げ",
+    "坂路4F", "坂路ラスト1F", "坂路本数", "ウッド4F", "ウッドラスト1F", "ウッド本数", "最終追切からの日数", "最終追切ラスト1F",
 ];
-const GROUPS: [(&str, &[usize]); 8] = [
+const GROUPS: [(&str, &[usize]); 9] = [
     ("時計", &[0, 1, 2]),
     ("上がり・展開", &[3, 4, 5]),
     ("着順・着差", &[6, 7, 9]),
@@ -25,6 +26,7 @@ const GROUPS: [(&str, &[usize]); 8] = [
     ("騎手・調教師", &[11, 12, 13, 28, 29]),
     ("状態・ローテ", &[14, 15, 16, 17, 18, 19, 21, 22, 23]),
     ("その他", &[20, 24, 25, 26, 27]),
+    ("調教", &[30, 31, 32, 33, 34, 35, 36, 37]),
 ];
 
 #[derive(Clone)]
@@ -52,6 +54,66 @@ struct Stat {
     n: f64,
     win: f64,
     top3: f64,
+}
+
+/// 調教1本。時間は秒、基準（2021年のトレセン・種類ごとの中央値）との差に直す前の値
+#[derive(Clone)]
+struct Work {
+    date: u32,
+    slope: bool,
+    center: u8,
+    course: u8,
+    t4: Option<f64>,
+    last1: Option<f64>,
+}
+
+fn tenth_field(rec: &[u8], pos: usize, len: usize) -> Option<f64> {
+    let s = std::str::from_utf8(&rec[pos - 1..pos - 1 + len]).ok()?;
+    let v: f64 = s.trim().parse().ok()?;
+    if v <= 0.0 || s.chars().all(|c| c == '9') { None } else { Some(v / 10.0) }
+}
+
+fn int_field(rec: &[u8], pos: usize, len: usize) -> u32 {
+    std::str::from_utf8(&rec[pos - 1..pos - 1 + len]).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+}
+
+/// SLOP/HC.txt（坂路）と WOOD/WC.txt（ウッドチップ）を読み、馬ごとに日付順の調教リストにする
+fn load_works(out_dir: &std::path::Path) -> HashMap<String, Vec<Work>> {
+    let mut m: HashMap<String, Vec<Work>> = HashMap::new();
+    for (file, slope, len) in [("SLOP/HC.txt", true, 58usize), ("WOOD/WC.txt", false, 103usize)] {
+        let Ok(f) = std::fs::File::open(out_dir.join(file)) else {
+            eprintln!("調教データがありません: {}", file);
+            continue;
+        };
+        let mut r = std::io::BufReader::with_capacity(1 << 20, f);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            if r.read_until(b'\n', &mut buf).unwrap_or(0) == 0 {
+                break;
+            }
+            if buf.len() < len || buf[2] == b'0' {
+                continue; // データ区分 0 = 削除
+            }
+            let horse = String::from_utf8_lossy(&buf[24..34]).to_string();
+            let w = if slope {
+                // HC: 4F合計 35(4) / ラップ 200-0M 56(3)
+                Work { date: int_field(&buf, 13, 8), slope, center: buf[11] - b'0', course: 0, t4: tenth_field(&buf, 35, 4), last1: tenth_field(&buf, 56, 3) }
+            } else {
+                // WC: コース 35(1) / 4F合計 80(4) / ラップ 200-0M 101(3)
+                Work { date: int_field(&buf, 13, 8), slope, center: buf[11] - b'0', course: buf[34] - b'0', t4: tenth_field(&buf, 80, 4), last1: tenth_field(&buf, 101, 3) }
+            };
+            m.entry(horse).or_default().push(w);
+        }
+    }
+    for v in m.values_mut() {
+        v.sort_by_key(|w| w.date);
+    }
+    m
+}
+
+fn work_key(w: &Work) -> (bool, u8, u8) {
+    (w.slope, w.center, if w.slope { 0 } else { w.course })
 }
 
 struct Runner {
@@ -116,6 +178,23 @@ fn standardize(col: &mut [f64]) {
 
 fn main() {
     let path = std::env::args().nth(1).expect("jv_races.jsonl を指定してください");
+    let out_dir = std::path::PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "../backtest/jvdata/out".into()));
+    let works = load_works(&out_dir);
+    // 調教タイムの基準: 2021年の、坂路/ウッド × トレセン × コースごとの中央値
+    let mut wv: HashMap<(bool, u8, u8), (Vec<f64>, Vec<f64>)> = HashMap::new();
+    for v in works.values() {
+        for w in v.iter().filter(|w| w.date < 20220101) {
+            let e = wv.entry(work_key(w)).or_default();
+            if let Some(t) = w.t4 { e.0.push(t); }
+            if let Some(t) = w.last1 { e.1.push(t); }
+        }
+    }
+    let work_std: HashMap<(bool, u8, u8), (f64, f64)> = wv
+        .into_iter()
+        .filter(|(_, (a, b))| a.len() >= 100 && b.len() >= 100)
+        .map(|(k, (mut a, mut b))| (k, (median(&mut a), median(&mut b))))
+        .collect();
+    println!("調教: {} 頭分 / 基準 {} 種類", works.len(), work_std.len());
     let mut races: Vec<JvRace> = std::io::BufReader::new(std::fs::File::open(&path).unwrap())
         .lines()
         .map_while(Result::ok)
@@ -232,6 +311,27 @@ fn main() {
                     last.map(|l| if l.jockey != h.jockey { 1.0 } else { 0.0 }).unwrap_or(f64::NAN),
                     last.map(|_| logit_rate(js.top3, js.n, 0.21, 50.0) - logit_rate(last_js.top3, last_js.n, 0.21, 50.0)).unwrap_or(f64::NAN),
                 ]);
+                // 調教: レース日の前日までの14日間。速いほど大きい値になるよう、基準との差を「基準 − タイム」で持つ
+                let row = rows.last_mut().unwrap();
+                let from = ymd_days(dnum) - 14;
+                let recent: Vec<&Work> = works
+                    .get(&h.horse_id)
+                    .map(|v| v.iter().filter(|w| w.date < dnum && ymd_days(w.date) >= from).collect())
+                    .unwrap_or_default();
+                let rel = |w: &Work, four: bool| -> Option<f64> {
+                    let (s4, s1) = work_std.get(&work_key(w))?;
+                    if four { w.t4.map(|t| s4 - t) } else { w.last1.map(|t| s1 - t) }
+                };
+                for slope in [true, false] {
+                    let ws: Vec<&&Work> = recent.iter().filter(|w| w.slope == slope).collect();
+                    let best = |four: bool| ws.iter().filter_map(|w| rel(w, four)).fold(f64::NAN, f64::max);
+                    row.push(best(true));
+                    row.push(best(false));
+                    row.push(ws.len() as f64);
+                }
+                let lastw = recent.last();
+                row.push(lastw.map(|w| (ymd_days(dnum) - ymd_days(w.date)) as f64).unwrap_or(f64::NAN));
+                row.push(lastw.and_then(|w| rel(w, false)).unwrap_or(f64::NAN));
             }
             // 欠けた値はレース内の平均で埋め、レース内で標準化
             let k = rows[0].len();
