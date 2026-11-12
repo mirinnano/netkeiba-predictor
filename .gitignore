@@ -24,3 +24,7 @@ backtest/
 # Impeccable working artifacts
 .impeccable/mocks/
 .impeccable/review/
+
+# JV-Link dump output and build
+tools/jvlink-dump/out/
+tools/jvlink-dump/*.exe
