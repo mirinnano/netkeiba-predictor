@@ -10,14 +10,15 @@ use netkeiba_predictor_lib::jvdata::{JvRace, JvRunner};
 use std::collections::HashMap;
 use std::io::BufRead;
 
-const NAMES: [&str; 38] = [
+const NAMES: [&str; 43] = [
     "指数最高3", "指数平均3", "指数前走", "上がり順位", "展開不利", "4角から挽回", "着差", "着順率", "過去人気",
     "人気以上", "クラス変化", "騎手3着内", "調教師3着内", "騎手勝率", "間隔", "距離変更", "芝ダ替わり", "斤量差",
     "馬体重増減", "馬体重", "馬齢", "出走数", "ブリンカー", "初ブリンカー", "馬番位置", "脚質", "同場3着内", "同距離3着内",
     "乗り替わり", "騎手の格上げ",
     "坂路4F", "坂路ラスト1F", "坂路本数", "ウッド4F", "ウッドラスト1F", "ウッド本数", "最終追切からの日数", "最終追切ラスト1F",
+    "最終追切の加速", "自己比ラスト1F", "併せ馬", "28日本数", "最終が坂路",
 ];
-const GROUPS: [(&str, &[usize]); 9] = [
+const GROUPS: [(&str, &[usize]); 10] = [
     ("時計", &[0, 1, 2]),
     ("上がり・展開", &[3, 4, 5]),
     ("着順・着差", &[6, 7, 9]),
@@ -27,6 +28,7 @@ const GROUPS: [(&str, &[usize]); 9] = [
     ("状態・ローテ", &[14, 15, 16, 17, 18, 19, 21, 22, 23]),
     ("その他", &[20, 24, 25, 26, 27]),
     ("調教", &[30, 31, 32, 33, 34, 35, 36, 37]),
+    ("調教(詳細)", &[38, 39, 40, 41, 42]),
 ];
 
 #[derive(Clone)]
@@ -65,6 +67,11 @@ struct Work {
     course: u8,
     t4: Option<f64>,
     last1: Option<f64>,
+    /// ラスト1F の1つ前のラップ（400M〜200M）
+    lap2: Option<f64>,
+    time: u32,
+    /// 同じトレセン・同じ日・同じ時刻・同じ種類で調教した他の馬の数（併せ馬の目安）
+    partners: u32,
 }
 
 fn tenth_field(rec: &[u8], pos: usize, len: usize) -> Option<f64> {
@@ -98,16 +105,26 @@ fn load_works(out_dir: &std::path::Path) -> HashMap<String, Vec<Work>> {
             let horse = String::from_utf8_lossy(&buf[24..34]).to_string();
             let w = if slope {
                 // HC: 4F合計 35(4) / ラップ 200-0M 56(3)
-                Work { date: int_field(&buf, 13, 8), slope, center: buf[11] - b'0', course: 0, t4: tenth_field(&buf, 35, 4), last1: tenth_field(&buf, 56, 3) }
+                Work { date: int_field(&buf, 13, 8), slope, center: buf[11] - b'0', course: 0, t4: tenth_field(&buf, 35, 4), last1: tenth_field(&buf, 56, 3), lap2: tenth_field(&buf, 53, 3), time: int_field(&buf, 21, 4), partners: 0 }
             } else {
                 // WC: コース 35(1) / 4F合計 80(4) / ラップ 200-0M 101(3)
-                Work { date: int_field(&buf, 13, 8), slope, center: buf[11] - b'0', course: buf[34] - b'0', t4: tenth_field(&buf, 80, 4), last1: tenth_field(&buf, 101, 3) }
+                Work { date: int_field(&buf, 13, 8), slope, center: buf[11] - b'0', course: buf[34] - b'0', t4: tenth_field(&buf, 80, 4), last1: tenth_field(&buf, 101, 3), lap2: tenth_field(&buf, 98, 3), time: int_field(&buf, 21, 4), partners: 0 }
             };
             m.entry(horse).or_default().push(w);
         }
     }
+    // 併せ馬の目安: 同じ (種類, トレセン, コース, 日, 時刻) に何頭いたか
+    let mut slots: HashMap<(bool, u8, u8, u32, u32), u32> = HashMap::new();
+    for v in m.values() {
+        for w in v {
+            *slots.entry((w.slope, w.center, w.course, w.date, w.time)).or_default() += 1;
+        }
+    }
     for v in m.values_mut() {
-        v.sort_by_key(|w| w.date);
+        for w in v.iter_mut() {
+            w.partners = slots.get(&(w.slope, w.center, w.course, w.date, w.time)).copied().unwrap_or(1) - 1;
+        }
+        v.sort_by_key(|w| (w.date, w.time));
     }
     m
 }
@@ -332,6 +349,27 @@ fn main() {
                 let lastw = recent.last();
                 row.push(lastw.map(|w| (ymd_days(dnum) - ymd_days(w.date)) as f64).unwrap_or(f64::NAN));
                 row.push(lastw.and_then(|w| rel(w, false)).unwrap_or(f64::NAN));
+                // 詳細: 最終追い切りの加速（1つ前のラップ − ラスト1F、正なら加速）
+                row.push(lastw.and_then(|w| match (w.lap2, w.last1) { (Some(a), Some(b)) => Some((a - b).clamp(-3.0, 3.0)), _ => None }).unwrap_or(f64::NAN));
+                // 自己比: 14日間の最速ラスト1F（基準との差）− 15〜120日前の同じ種類の中央値（基準との差）
+                let own = |slope: bool| -> Option<f64> {
+                    let mut v: Vec<f64> = works
+                        .get(&h.horse_id)?
+                        .iter()
+                        .filter(|w| w.slope == slope && w.date < dnum && ymd_days(w.date) < from && ymd_days(w.date) >= ymd_days(dnum) - 120)
+                        .filter_map(|w| rel(w, false))
+                        .collect();
+                    if v.len() < 3 { None } else { Some(median(&mut v)) }
+                };
+                let self_rel = lastw.and_then(|lw| {
+                    let best = recent.iter().filter(|w| w.slope == lw.slope).filter_map(|w| rel(w, false)).fold(f64::NAN, f64::max);
+                    own(lw.slope).filter(|_| best.is_finite()).map(|m| best - m)
+                });
+                row.push(self_rel.unwrap_or(f64::NAN));
+                row.push(lastw.map(|w| if w.partners > 0 { 1.0 } else { 0.0 }).unwrap_or(f64::NAN));
+                let from28 = ymd_days(dnum) - 28;
+                row.push(works.get(&h.horse_id).map(|v| v.iter().filter(|w| w.date < dnum && ymd_days(w.date) >= from28).count() as f64).unwrap_or(0.0));
+                row.push(lastw.map(|w| if w.slope { 1.0 } else { 0.0 }).unwrap_or(f64::NAN));
             }
             // 欠けた値はレース内の平均で埋め、レース内で標準化
             let k = rows[0].len();
@@ -547,7 +585,9 @@ fn evaluate(data: &[(String, Vec<Runner>)]) {
     let mut variants: Vec<(String, bool, Vec<usize>)> = vec![
         ("市場(γ補正)".into(), true, vec![]),
         ("モデルのみ(市場なし)".into(), false, all.clone()),
-        ("市場+全特徴量".into(), true, all.clone()),
+        // 採用している 38 特徴量（調教の詳細 5 つは検証で悪化したので外す）
+        ("市場+全特徴量".into(), true, (0..38).collect()),
+        ("市場+全特徴量+調教詳細".into(), true, all.clone()),
     ];
     for (g, cols) in GROUPS {
         variants.push((format!("市場+{}", g), true, cols.to_vec()));
@@ -599,10 +639,17 @@ fn evaluate(data: &[(String, Vec<Runner>)]) {
         let (m, lo, hi) = paired_ci(&pooled[vi + 1], &pooled[1]);
         println!("  {:<22} {:+.4} [{:+.4}, {:+.4}]{}", variants[vi].0, m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
     }
+    {
+        // pooled[0]=市場, [1]=市場(γ補正), [2]=モデルのみ, [3]=市場+全特徴量, [4]=+調教詳細
+        let (m, lo, hi) = paired_ci(&pooled[4], &pooled[3]);
+        println!("  調教詳細の上積み = (+調教詳細) − 全特徴量: {:+.4} [{:+.4}, {:+.4}]{}", m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
+    }
     println!("\n[市場+全特徴量の係数（区間ごと。符号が揃うものが本物）]");
     println!("  {:<12} {}", "log(市場)", coefs.iter().map(|b| format!("{:+.3}", b[0])).collect::<Vec<_>>().join(" "));
-    for (f, name) in NAMES.iter().enumerate() {
-        let v: Vec<f64> = coefs.iter().map(|b| b[f + 1]).collect();
+    // 採用モデル（variants[2]）の列の順に表示する
+    for (j, &f) in variants[2].2.iter().enumerate() {
+        let name = NAMES[f];
+        let v: Vec<f64> = coefs.iter().map(|b| b[j + 1]).collect();
         let same = v.iter().all(|x| *x > 0.0) || v.iter().all(|x| *x < 0.0);
         println!("  {:<12} {}{}", name, v.iter().map(|x| format!("{:+.3}", x)).collect::<Vec<_>>().join(" "), if same { "  ✓" } else { "" });
     }
