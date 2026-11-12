@@ -153,6 +153,9 @@ pub struct BetRecommendation {
     pub is_hit: Option<bool>,    // Some(true/false) if race is finished
     pub actual_payout_per_100: Option<u32>,
     pub actual_return: Option<u32>,
+    /// true のとき est_odds は実オッズではなく推定値
+    #[serde(default)]
+    pub odds_is_estimated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +200,40 @@ pub struct RacePredictionResult {
     pub roi_percent: Option<f64>,
     pub memo: String,
     pub saved_at: Option<String>,
+    /// レース確定前の情報だけで作った予想なら true。回収率の集計対象になる。
+    #[serde(default)]
+    pub pre_race: bool,
+    #[serde(default)]
+    pub combo_odds: ComboOdds,
+}
+
+/// 組み合わせ馬券の実オッズ。キーは昇順の馬番を "-" で連結したもの（例: "1-2", "1-2-3"）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ComboOdds {
+    #[serde(default)]
+    pub umaren: std::collections::HashMap<String, f64>,
+    /// ワイドは下限オッズ
+    #[serde(default)]
+    pub wide: std::collections::HashMap<String, f64>,
+    #[serde(default)]
+    pub sanrenpuku: std::collections::HashMap<String, f64>,
+}
+
+pub fn combo_key(horses: &[u32]) -> String {
+    let mut h = horses.to_vec();
+    h.sort_unstable();
+    h.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("-")
+}
+
+/// result.html から読んだ1頭分の確定着順
+#[derive(Debug, Clone)]
+pub struct ResultRow {
+    pub umaban: u32,
+    pub rank: u32,
+    pub time: Option<String>,
+    pub last_3f: Option<f64>,
+    pub win_odds: Option<f64>,
+    pub popularity: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +251,7 @@ pub struct SavedPredictionSummary {
     pub total_bet: u32,
     pub total_return: Option<u32>,
     pub is_verified: bool,
+    pub is_pre_race: bool,
     pub memo: String,
     pub saved_at: String,
 }
@@ -221,7 +259,10 @@ pub struct SavedPredictionSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoiDashboardStats {
     pub total_saved_races: u32,
+    /// 確定前に保存し、結果照合まで済んだレース数（回収率の母数）
     pub verified_races: u32,
+    /// 確定後に保存したため集計から除外したレース数
+    pub backtest_races: u32,
     pub honmei_win_count: u32,
     pub honmei_top3_count: u32,
     pub ticket_hit_races: u32,
@@ -230,4 +271,36 @@ pub struct RoiDashboardStats {
     pub net_profit: i64,
     pub overall_roi: f64,
     pub recent_history: Vec<SavedPredictionSummary>,
+}
+
+/// db.netkeiba.com の競走成績ページの1走分（レースの中身まで含む）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HorseRun {
+    pub date: String,            // "2025/07/27"
+    pub race_id: String,
+    pub venue: String,
+    pub race_name: String,
+    pub head_count: Option<u32>,
+    pub waku: Option<u32>,
+    pub umaban: Option<u32>,
+    pub odds: Option<f64>,
+    pub popularity: Option<u32>,
+    pub finish_rank: Option<u32>,
+    pub jockey: String,
+    pub carried_weight: Option<f64>,
+    pub surface: String,         // "芝" | "ダ" | "障"
+    pub distance: Option<u32>,
+    pub track_cond: String,
+    /// netkeiba の馬場指数（無料で見える場合のみ）
+    pub track_index: Option<i32>,
+    pub time_sec: Option<f64>,
+    pub margin: Option<f64>,
+    pub passage: String,         // "6-7-7-3"
+    /// レース全体の前半3F・後半3F（"36.4-34.0"）
+    pub race_first3f: Option<f64>,
+    pub race_last3f: Option<f64>,
+    /// この馬の上がり3F と、レース内での上がり順位（1〜3位のみ判明）
+    pub last3f: Option<f64>,
+    pub last3f_rank: Option<u32>,
+    pub body_weight: Option<u32>,
 }

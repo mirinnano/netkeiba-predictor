@@ -1,6 +1,6 @@
 use crate::models::{
-    HorseEntry, KaisaiCalendarResponse, KaisaiDateItem, OfficialPayoutItem, PastRun, RaceInfo,
-    RaceSummary, VenueRaces,
+    combo_key, ComboOdds, HorseRun, HorseEntry, KaisaiCalendarResponse, KaisaiDateItem, OfficialPayoutItem,
+    PastRun, RaceInfo, RaceSummary, ResultRow, VenueRaces,
 };
 use encoding_rs::EUC_JP;
 use regex::Regex;
@@ -133,6 +133,42 @@ fn parse_weather_from_classes(html_fragment: &str) -> String {
         "小雪".to_string()
     } else {
         "晴".to_string()
+    }
+}
+
+/// コース文字列から馬場種別を判定する。
+/// 障害戦は "障4100m 芝" や "障3170(芝 内-外)" のように「芝」も含むので、「障」を先に見る。
+pub(crate) fn detect_surface(txt: &str) -> String {
+    if txt.contains('障') {
+        "障".to_string()
+    } else if txt.contains('芝') {
+        "芝".to_string()
+    } else if txt.contains('ダ') {
+        "ダ".to_string()
+    } else {
+        "芝".to_string()
+    }
+}
+
+/// レース名やグレードから障害戦かを判定する。
+/// 枠順確定前の障害戦は netkeiba でも "芝2750m" としか表示されないため、コース文字列だけでは判定できない。
+pub(crate) fn is_jump_race(race_name: &str, grade: Option<&str>) -> bool {
+    race_name.contains("障害")
+        || race_name.contains("ジャンプ")
+        || grade.map(|g| g.starts_with('J')).unwrap_or(false)
+}
+
+/// 過去走のレース名。<a> 直下のテキストだけを使い、グレードアイコンの <span> は除く。
+pub(crate) fn race_name_from_link(el: ElementRef) -> String {
+    let direct: String = el
+        .children()
+        .filter_map(|c| c.value().as_text().map(|t| t.to_string()))
+        .collect();
+    let name = clean_text(&direct);
+    if name.is_empty() {
+        clean_text(&el.text().collect::<String>())
+    } else {
+        name
     }
 }
 
@@ -345,14 +381,10 @@ pub async fn fetch_race_list(kaisai_date: &str, is_nar: bool) -> Result<Vec<Venu
                 .map(|el| clean_text(&el.text().collect::<String>()))
                 .unwrap_or_default();
 
-            let surface = if long_txt.contains('芝') {
-                "芝".to_string()
-            } else if long_txt.contains('ダ') {
-                "ダ".to_string()
-            } else if long_txt.contains('障') {
+            let surface = if is_jump_race(&title, grade.as_deref()) {
                 "障".to_string()
             } else {
-                "芝".to_string()
+                detect_surface(&long_txt)
             };
 
             let distance = re_dist
@@ -437,16 +469,7 @@ fn parse_past_run(td: ElementRef) -> Option<PastRun> {
         .and_then(|el| clean_text(&el.text().collect::<String>()).parse::<u32>().ok());
 
     let d02_el = item.select(&d02_sel).next();
-    let race_name = d02_el
-        .map(|el| {
-            clean_text(&el.text().collect::<String>())
-                .replace("GI", "")
-                .replace("GII", "")
-                .replace("GIII", "")
-                .trim()
-                .to_string()
-        })
-        .unwrap_or_default();
+    let race_name = d02_el.map(race_name_from_link).unwrap_or_default();
     let grade = d02_el.and_then(|el| parse_grade_from_classes(&el.inner_html()));
 
     let d05_txt = item
@@ -460,15 +483,7 @@ fn parse_past_run(td: ElementRef) -> Option<PastRun> {
         .map(|el| clean_text(&el.text().collect::<String>()))
         .unwrap_or_else(|| "良".to_string());
 
-    let surface = if d05_txt.contains('芝') {
-        "芝".to_string()
-    } else if d05_txt.contains('ダ') {
-        "ダ".to_string()
-    } else if d05_txt.contains('障') {
-        "障".to_string()
-    } else {
-        "芝".to_string()
-    };
+    let surface = detect_surface(&d05_txt);
 
     let re_dist = Regex::new(r"(\d{3,4})").unwrap();
     let distance = re_dist
@@ -658,11 +673,8 @@ async fn fetch_jra_odds(
     map
 }
 
-fn parse_result_and_payouts(
-    html: &str,
-    entries: &mut [HorseEntry],
-) -> (bool, Vec<OfficialPayoutItem>) {
-    let doc = Html::parse_document(html);
+/// result.html の着順表を読む。着順が数字の行（＝確定した行）だけを返す。
+fn parse_result_rows(doc: &Html) -> Vec<ResultRow> {
     let tr_sel = Selector::parse("#All_Result_Table tr.HorseList, table.RaceTable01 tr.HorseList").unwrap();
     let rank_sel = Selector::parse("td.Result_Num div.Rank, td.Result_Num").unwrap();
     let umaban_sel = Selector::parse("td.Num.Txt_C div, td.Num.Txt_C").unwrap();
@@ -671,14 +683,14 @@ fn parse_result_and_payouts(
     let odds_sel = Selector::parse("td.Odds span.Odds_Ninki").unwrap();
     let bg_time_sel = Selector::parse("td.Time").unwrap();
 
-    let mut found_results = false;
+    let mut rows = Vec::new();
     for tr in doc.select(&tr_sel) {
         let rank_txt = tr
             .select(&rank_sel)
             .next()
             .map(|el| clean_text(&el.text().collect::<String>()))
             .unwrap_or_default();
-        let Ok(actual_rank) = rank_txt.parse::<u32>() else {
+        let Ok(rank) = rank_txt.parse::<u32>() else {
             continue;
         };
 
@@ -691,15 +703,14 @@ fn parse_result_and_payouts(
             }
         }
         let Some(umaban) = umaban_opt else { continue };
-        found_results = true;
 
-        let actual_time = tr
+        let time = tr
             .select(&time_sel)
             .next()
             .map(|el| clean_text(&el.text().collect::<String>()))
             .filter(|s| !s.is_empty());
 
-        let pop = tr
+        let popularity = tr
             .select(&pop_sel)
             .next()
             .and_then(|el| clean_text(&el.text().collect::<String>()).parse::<u32>().ok());
@@ -719,22 +730,45 @@ fn parse_result_and_payouts(
             }
         }
 
-        if let Some(entry) = entries.iter_mut().find(|e| e.umaban == umaban) {
-            entry.actual_rank = Some(actual_rank);
-            if actual_time.is_some() {
-                entry.actual_time = actual_time;
+        rows.push(ResultRow {
+            umaban,
+            rank,
+            time,
+            last_3f,
+            win_odds,
+            popularity,
+        });
+    }
+    rows
+}
+
+/// 確定着順を出走馬に書き込む。fill_odds が true なら、オッズ未取得の馬に確定オッズを補う。
+pub fn apply_result_rows(entries: &mut [HorseEntry], rows: &[ResultRow], fill_odds: bool) {
+    for row in rows {
+        if let Some(entry) = entries.iter_mut().find(|e| e.umaban == row.umaban) {
+            entry.actual_rank = Some(row.rank);
+            if row.time.is_some() {
+                entry.actual_time = row.time.clone();
             }
-            if last_3f.is_some() {
-                entry.actual_last_3f = last_3f;
+            if row.last_3f.is_some() {
+                entry.actual_last_3f = row.last_3f;
             }
-            if entry.win_odds.is_none() && win_odds.is_some() {
-                entry.win_odds = win_odds;
-            }
-            if entry.popularity.is_none() && pop.is_some() {
-                entry.popularity = pop;
+            if fill_odds {
+                if entry.win_odds.is_none() && row.win_odds.is_some() {
+                    entry.win_odds = row.win_odds;
+                }
+                if entry.popularity.is_none() && row.popularity.is_some() {
+                    entry.popularity = row.popularity;
+                }
             }
         }
     }
+}
+
+/// result.html から確定着順と払戻を読む。返り値の Vec<ResultRow> が空なら未確定。
+fn parse_result_and_payouts(html: &str) -> (Vec<ResultRow>, Vec<OfficialPayoutItem>) {
+    let doc = Html::parse_document(html);
+    let rows = parse_result_rows(&doc);
 
     // Parse Payout_Detail_Table
     let mut payouts = Vec::new();
@@ -827,12 +861,88 @@ fn parse_result_and_payouts(
         }
     }
 
-    (found_results, payouts)
+    (rows, payouts)
+}
+
+/// 確定結果と払戻だけを取得する（保存済み予想の結果照合用）。
+pub async fn fetch_race_result(
+    race_id: &str,
+) -> Result<(Vec<ResultRow>, Vec<OfficialPayoutItem>), String> {
+    let (race_id, is_nar) = extract_race_id(race_id)?;
+    let base_domain = if is_nar {
+        "https://nar.netkeiba.com"
+    } else {
+        "https://race.netkeiba.com"
+    };
+    let client = build_client()?;
+    let result_url = format!("{}/race/result.html?race_id={}", base_domain, race_id);
+    let html = fetch_html(&client, &result_url).await?;
+    Ok(parse_result_and_payouts(&html))
+}
+
+/// JRA の組み合わせ馬券オッズ（馬連=4, ワイド=5, 3連複=7）。取れなかった券種は空のまま。
+async fn fetch_jra_combo_odds(client: &reqwest::Client, race_id: &str) -> ComboOdds {
+    let mut combo = ComboOdds::default();
+    for (type_id, pair_len) in [("4", 2_usize), ("5", 2), ("7", 3)] {
+        let url = format!(
+            "https://race.netkeiba.com/api/api_get_jra_odds.html?pid=api_get_jra_odds&input=UTF-8&output=json&race_id={}&type={}&action=init&compress=0",
+            race_id, type_id
+        );
+        let Ok(text) = fetch_html(client, &url).await else {
+            continue;
+        };
+        let map = parse_combo_odds_json(&text, type_id, pair_len);
+        match type_id {
+            "4" => combo.umaren = map,
+            "5" => combo.wide = map,
+            _ => combo.sanrenpuku = map,
+        }
+    }
+    combo
+}
+
+/// odds API の JSON から {"0102": ["12.3", ...]} 形式を読み、キーを "1-2" に直す。
+pub(crate) fn parse_combo_odds_json(
+    text: &str,
+    type_id: &str,
+    horses: usize,
+) -> HashMap<String, f64> {
+    let mut out = HashMap::new();
+    let Ok(json) = serde_json::from_str::<Value>(text) else {
+        return out;
+    };
+    let Some(obj) = json
+        .get("data")
+        .and_then(|d| d.get("odds"))
+        .and_then(|o| o.get(type_id))
+        .and_then(|v| v.as_object())
+    else {
+        return out;
+    };
+    for (k, v) in obj {
+        if k.len() != horses * 2 {
+            continue;
+        }
+        let nums: Option<Vec<u32>> = (0..horses)
+            .map(|i| k[i * 2..i * 2 + 2].parse::<u32>().ok())
+            .collect();
+        let Some(nums) = nums else { continue };
+        let odds = v
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|x| x.as_str())
+            .and_then(|s| s.replace(',', "").parse::<f64>().ok())
+            .filter(|&o| o > 0.0);
+        if let Some(o) = odds {
+            out.insert(combo_key(&nums), o);
+        }
+    }
+    out
 }
 
 pub async fn scrape_race_data(
     input: &str,
-) -> Result<(RaceInfo, Vec<HorseEntry>, Vec<OfficialPayoutItem>), String> {
+) -> Result<(RaceInfo, Vec<HorseEntry>, Vec<OfficialPayoutItem>, ComboOdds), String> {
     let (race_id, is_nar) = extract_race_id(input)?;
     let base_domain = if is_nar {
         "https://nar.netkeiba.com"
@@ -865,7 +975,9 @@ pub async fn scrape_race_data(
     }
 
     // Fetch live/official/estimated JRA odds JSON API
+    let mut combo_odds = ComboOdds::default();
     if !is_nar {
+        combo_odds = fetch_jra_combo_odds(&client, &race_id).await;
         let odds_map = fetch_jra_odds(&client, &race_id).await;
         for entry in &mut entries {
             let lookup_key = odds_key_map
@@ -896,8 +1008,9 @@ pub async fn scrape_race_data(
     let result_url = format!("{}/race/result.html?race_id={}", base_domain, race_id);
     let mut official_payouts = Vec::new();
     if let Ok(res_html) = fetch_html(&client, &result_url).await {
-        let (is_done, payouts) = parse_result_and_payouts(&res_html, &mut entries);
-        if is_done {
+        let (rows, payouts) = parse_result_and_payouts(&res_html);
+        if !rows.is_empty() {
+            apply_result_rows(&mut entries, &rows, true);
             race_info.is_finished = true;
             official_payouts = payouts;
         }
@@ -905,7 +1018,7 @@ pub async fn scrape_race_data(
 
     race_info.head_count = entries.iter().filter(|e| !e.is_scratched).count() as u32;
 
-    Ok((race_info, entries, official_payouts))
+    Ok((race_info, entries, official_payouts, combo_odds))
 }
 
 fn parse_race_header(doc: &Html, race_id: &str, source_url: &str) -> RaceInfo {
@@ -958,14 +1071,10 @@ fn parse_race_header(doc: &Html, race_id: &str, source_url: &str) -> RaceInfo {
         .map(|c| c[1].to_string())
         .unwrap_or_else(|| "--:--".to_string());
 
-    let surface = if d01_txt.contains('芝') {
-        "芝".to_string()
-    } else if d01_txt.contains('ダ') {
-        "ダ".to_string()
-    } else if d01_txt.contains('障') {
+    let surface = if is_jump_race(&raw_race_name, grade.as_deref()) {
         "障".to_string()
     } else {
-        "芝".to_string()
+        detect_surface(&d01_txt)
     };
 
     let re_dist = Regex::new(r"(\d{3,4})m").unwrap();
@@ -1398,4 +1507,169 @@ fn parse_shutuba_fallback_html(
     }
 
     Ok((race_info, entries))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn horse_results_are_read_by_header_name() {
+        let html = r#"<table class="db_h_race_results"><thead><tr>
+            <th>日付</th><th>開催</th><th>レース名</th><th>頭数</th><th>枠番</th><th>馬番</th><th>オッズ</th><th>人気</th>
+            <th>着順</th><th>騎手</th><th>斤量</th><th>距離</th><th>馬場</th><th>馬場指数</th><th>タイム</th><th>着差</th>
+            <th>通過</th><th>ペース</th><th>上り</th><th>馬体重</th></tr></thead><tbody>
+            <tr><td>2023/10/15</td><td>2京都5</td><td><a href="/race/202308020511/">秋華賞(GI)</a></td><td>18</td><td>3</td><td>6</td>
+            <td>1.1</td><td>1</td><td>1</td><td>川田将雅</td><td>55</td><td>芝2000</td><td>稍</td><td>-5</td><td>2:01.1</td><td>-0.1</td>
+            <td>6-7-7-3</td><td>36.4-34.0</td><td class="rank_2 ">33.6</td><td>476(+10)</td></tr></tbody></table>"#;
+        let runs = parse_horse_results(html);
+        assert_eq!(runs.len(), 1);
+        let r = &runs[0];
+        assert_eq!(r.race_id, "202308020511");
+        assert_eq!((r.surface.as_str(), r.distance), ("芝", Some(2000)));
+        assert_eq!((r.race_first3f, r.race_last3f), (Some(36.4), Some(34.0)));
+        assert_eq!((r.last3f, r.last3f_rank), (Some(33.6), Some(2)));
+        assert_eq!(r.time_sec, Some(121.1));
+        assert_eq!(r.track_index, Some(-5));
+        assert_eq!(r.body_weight, Some(476));
+    }
+
+    #[test]
+    fn jump_races_are_detected_before_turf() {
+        // netkeiba の実際の表記（202306050710 中山大障害）
+        assert_eq!(detect_surface("15:05発走 / 障4100m 芝 / 良"), "障");
+        assert_eq!(detect_surface("障3170(芝 内-外) 3:38.7"), "障");
+        assert_eq!(detect_surface("芝2400m 左 C / 良"), "芝");
+        assert_eq!(detect_surface("ダ1800m"), "ダ");
+        // 枠順確定前の障害戦は "芝2750m" としか出ない（202603030404 福島4R）
+        assert!(is_jump_race("3歳以上障害未勝利", None));
+        assert!(is_jump_race("東京ハイJ", Some("J・GII")));
+        assert!(!is_jump_race("2歳未勝利", None));
+        assert!(!is_jump_race("ジャパンC", Some("GI")));
+    }
+
+    #[test]
+    fn race_name_excludes_grade_icon() {
+        let html = Html::parse_fragment(
+            r#"<div class="Data02"><a href="/race/1">毎日王冠 <span class="Icon_GradeType Icon_GradeType2">GII</span> </a></div>
+               <div class="Data02"><a href="/race/2">中山大障害 <span class="Icon_GradeType Icon_GradeType10">JGI</span> </a></div>"#,
+        );
+        let sel = Selector::parse("div.Data02 a").unwrap();
+        let names: Vec<String> = html.select(&sel).map(race_name_from_link).collect();
+        assert_eq!(names, vec!["毎日王冠", "中山大障害"]);
+    }
+
+    #[test]
+    fn combo_odds_json_is_keyed_by_sorted_umaban() {
+        let json = r#"{"status":"result","data":{"odds":{"7":{"010203":["7.4","0.0","4"],"010205":["1,205.2","0.0","1"],"0102":["1.0","0","1"]}}}}"#;
+        let m = parse_combo_odds_json(json, "7", 3);
+        assert_eq!(m.get("1-2-3"), Some(&7.4));
+        assert_eq!(m.get("1-2-5"), Some(&1205.2));
+        assert_eq!(m.len(), 2);
+    }
+}
+
+
+/// db.netkeiba.com の馬の競走成績ページ（/horse/result/<id>/）から全走を読む。
+/// 列は見出しの名前で探す（列の並びが変わっても壊れにくくするため）。
+pub fn parse_horse_results(html: &str) -> Vec<HorseRun> {
+    let doc = Html::parse_document(html);
+    let table_sel = Selector::parse("table.db_h_race_results").unwrap();
+    let th_sel = Selector::parse("thead th, tr th").unwrap();
+    let tr_sel = Selector::parse("tbody tr").unwrap();
+    let td_sel = Selector::parse("td").unwrap();
+    let a_sel = Selector::parse("a").unwrap();
+    let Some(table) = doc.select(&table_sel).next() else {
+        return Vec::new();
+    };
+    let headers: Vec<String> = table
+        .select(&th_sel)
+        .map(|h| h.text().collect::<String>().split_whitespace().collect::<String>())
+        .collect();
+    let col = |name: &str| headers.iter().position(|h| h == name);
+    let (c_date, c_venue, c_name, c_heads, c_waku, c_umaban) =
+        (col("日付"), col("開催"), col("レース名"), col("頭数"), col("枠番"), col("馬番"));
+    let (c_odds, c_pop, c_rank, c_jockey, c_weight, c_dist) =
+        (col("オッズ"), col("人気"), col("着順"), col("騎手"), col("斤量"), col("距離"));
+    let (c_cond, c_tidx, c_time, c_margin, c_pass, c_pace, c_last, c_body) = (
+        col("馬場"),
+        col("馬場指数"),
+        col("タイム"),
+        col("着差"),
+        col("通過"),
+        col("ペース"),
+        col("上り"),
+        col("馬体重"),
+    );
+    let re_dist = Regex::new(r"^(芝|ダ|障)(\d{3,4})").unwrap();
+    let re_race = Regex::new(r"/race/(\w+)/?").unwrap();
+    let re_body = Regex::new(r"^(\d{3})").unwrap();
+    let re_rank = Regex::new(r"rank_(\d)").unwrap();
+
+    let mut out = Vec::new();
+    for tr in table.select(&tr_sel) {
+        let tds: Vec<ElementRef> = tr.select(&td_sel).collect();
+        if tds.len() < 10 {
+            continue;
+        }
+        let text = |c: Option<usize>| -> String {
+            c.and_then(|i| tds.get(i))
+                .map(|td| clean_text(&td.text().collect::<String>()))
+                .unwrap_or_default()
+        };
+        let num = |c: Option<usize>| -> Option<f64> { text(c).replace(',', "").parse::<f64>().ok() };
+        let int = |c: Option<usize>| -> Option<u32> { text(c).parse::<u32>().ok() };
+        let race_id = c_name
+            .and_then(|i| tds.get(i))
+            .and_then(|td| td.select(&a_sel).next())
+            .and_then(|a| a.value().attr("href"))
+            .and_then(|h| re_race.captures(h).map(|c| c[1].to_string()))
+            .unwrap_or_default();
+        let dist_txt = text(c_dist);
+        let (surface, distance) = match re_dist.captures(&dist_txt) {
+            Some(c) => (c[1].to_string(), c[2].parse().ok()),
+            None => (String::new(), None),
+        };
+        let pace = text(c_pace);
+        let mut pp = pace.split('-').map(|x| x.trim().parse::<f64>().ok());
+        let (f3, l3) = (pp.next().flatten(), pp.next().flatten());
+        let last_rank = c_last
+            .and_then(|i| tds.get(i))
+            .and_then(|td| td.value().attr("class"))
+            .and_then(|cl| re_rank.captures(cl).and_then(|c| c[1].parse::<u32>().ok()));
+        out.push(HorseRun {
+            date: text(c_date),
+            race_id,
+            venue: text(c_venue),
+            race_name: text(c_name),
+            head_count: int(c_heads),
+            waku: int(c_waku),
+            umaban: int(c_umaban),
+            odds: num(c_odds),
+            popularity: int(c_pop),
+            finish_rank: int(c_rank),
+            jockey: text(c_jockey),
+            carried_weight: num(c_weight),
+            surface,
+            distance,
+            track_cond: text(c_cond),
+            track_index: text(c_tidx).parse::<i32>().ok(),
+            time_sec: parse_time_to_seconds(&text(c_time)),
+            margin: num(c_margin),
+            passage: text(c_pass),
+            race_first3f: f3.filter(|v| *v > 0.0),
+            race_last3f: l3.filter(|v| *v > 0.0),
+            last3f: num(c_last),
+            last3f_rank: last_rank,
+            body_weight: re_body.captures(&text(c_body)).and_then(|c| c[1].parse().ok()),
+        });
+    }
+    out
+}
+
+pub async fn fetch_horse_results(horse_id: &str) -> Result<Vec<HorseRun>, String> {
+    let client = build_client()?;
+    let url = format!("https://db.netkeiba.com/horse/result/{}/", horse_id);
+    let html = fetch_html(&client, &url).await?;
+    Ok(parse_horse_results(&html))
 }

@@ -2,6 +2,7 @@ pub mod db;
 pub mod models;
 pub mod predictor;
 pub mod scraper;
+pub mod std_times;
 
 use models::{
     HorseEntry, KaisaiCalendarResponse, RacePredictionResult, RoiDashboardStats, ScoringWeights,
@@ -40,7 +41,8 @@ async fn analyze_race(
     budget: Option<u32>,
     strategy: Option<String>,
 ) -> Result<RacePredictionResult, String> {
-    let (race_info, entries, official_payouts) = scraper::scrape_race_data(&input).await?;
+    let (race_info, entries, official_payouts, combo_odds) =
+        scraper::scrape_race_data(&input).await?;
     let w = weights.unwrap_or_default();
     let b = budget.unwrap_or(3000);
     let s = strategy.unwrap_or_else(|| "balance".to_string());
@@ -53,6 +55,7 @@ async fn analyze_race(
         b,
         s,
         String::new(),
+        combo_odds,
     ))
 }
 
@@ -64,13 +67,15 @@ fn recalculate_prediction(
     strategy: String,
     memo: Option<String>,
 ) -> Result<RacePredictionResult, String> {
+    // 確定後に組み直した予想は結果を見た後のものなので、確定前フラグを落とす
+    let pre_race = current_result.pre_race && !current_result.race_info.is_finished;
     let entries: Vec<HorseEntry> = current_result
         .predictions
         .into_iter()
         .map(|p| p.entry)
         .collect();
 
-    let updated = predictor::run_prediction(
+    let mut updated = predictor::run_prediction(
         current_result.race_info,
         entries,
         current_result.official_payouts,
@@ -78,7 +83,9 @@ fn recalculate_prediction(
         budget,
         strategy,
         memo.unwrap_or(current_result.memo),
+        current_result.combo_odds,
     );
+    updated.pre_race = pre_race;
     Ok(updated)
 }
 
@@ -116,6 +123,9 @@ fn get_roi_dashboard(app: tauri::AppHandle) -> Result<RoiDashboardStats, String>
     db::get_dashboard_stats(&db_path)
 }
 
+/// 保存済み予想の買い目を、確定した払戻と照合する。
+/// 予想は作り直さない（作り直すと確定後のオッズで買い目が変わってしまうため）。
+/// 未確定なら保存内容を変えずにそのまま返す。
 #[tauri::command]
 async fn verify_saved_race_result(
     app: tauri::AppHandle,
@@ -123,16 +133,11 @@ async fn verify_saved_race_result(
 ) -> Result<RacePredictionResult, String> {
     let db_path = resolve_db_path(&app);
     let saved = db::load_prediction(&db_path, &race_id)?;
-    let (race_info, entries, official_payouts) = scraper::scrape_race_data(&race_id).await?;
-    let updated = predictor::run_prediction(
-        race_info,
-        entries,
-        official_payouts,
-        saved.weights,
-        saved.budget,
-        saved.strategy,
-        saved.memo,
-    );
+    let (rows, payouts) = scraper::fetch_race_result(&race_id).await?;
+    if rows.is_empty() {
+        return Ok(saved);
+    }
+    let updated = predictor::apply_official_result(saved, &rows, payouts);
     db::save_prediction(&db_path, updated)
 }
 
@@ -168,7 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_live_scrape_and_predict() {
-        let (race_info, entries, payouts) = scraper::scrape_race_data("202305050812")
+        let (race_info, entries, payouts, combo) = scraper::scrape_race_data("202305050812")
             .await
             .expect("Failed to scrape 202305050812 from netkeiba");
 
@@ -186,9 +191,23 @@ mod tests {
             3000,
             "balance".to_string(),
             "テスト保存".to_string(),
+            combo,
         );
 
         assert_eq!(result.predictions.len(), 18);
+        // JRA は組み合わせ馬券も実オッズが取れる
+        assert!(result
+            .recommendations
+            .iter()
+            .filter(|r| r.bet_type != "単勝")
+            .all(|r| !r.odds_is_estimated));
+        for r in &result.recommendations {
+            println!(
+                "{} {} p={:.3} odds={} EV={:.2} amount={} hit={:?}",
+                r.bet_type, r.combination_text, r.est_hit_prob, r.est_odds, r.expected_value,
+                r.suggested_amount, r.is_hit
+            );
+        }
         let honmei = result.predictions.first().unwrap();
         assert_eq!(honmei.mark, "◎");
         println!(
@@ -215,7 +234,7 @@ mod tests {
         assert!(!venues.is_empty());
         let first_race_id = &venues[0].races[0].race_id;
 
-        let (race_info, entries, payouts) = scraper::scrape_race_data(first_race_id)
+        let (race_info, entries, payouts, combo) = scraper::scrape_race_data(first_race_id)
             .await
             .expect("Failed to scrape NAR race");
         assert!(!entries.is_empty());
@@ -228,6 +247,7 @@ mod tests {
             3000,
             "balance".to_string(),
             "NARテスト".to_string(),
+            combo,
         );
         let honmei = result.predictions.first().unwrap();
         assert_eq!(honmei.mark, "◎");

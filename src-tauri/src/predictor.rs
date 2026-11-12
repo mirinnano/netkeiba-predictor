@@ -1,7 +1,395 @@
 use crate::models::{
-    BetRecommendation, HorseEntry, HorsePrediction, OfficialPayoutItem, PaceAnalysis, RaceInfo,
-    RacePredictionResult, ScoringWeights,
+    combo_key, BetRecommendation, ComboOdds, HorseEntry, HorsePrediction, OfficialPayoutItem,
+    PaceAnalysis, RaceInfo, RacePredictionResult, ResultRow, ScoringWeights,
 };
+
+// JRA の払戻率。単勝 80%、馬連・ワイド 77.5%、3連複 75%。
+const TAKEOUT_WIN: f64 = 0.80;
+const TAKEOUT_UMAREN: f64 = 0.775;
+const TAKEOUT_WIDE: f64 = 0.775;
+const TAKEOUT_TRIO: f64 = 0.75;
+
+/// Harville 型の着順モデル。勝率 p から着順の同時確率を出す。
+///
+/// 素の Harville は「2着・3着も勝率の比で決まる」と仮定するため、人気馬の2・3着を過大に見積もる。
+/// Lo, Bacon-Shone & Busche (1995) の補正に従い、2着の段では p^λ2、3着の段では p^λ3 を
+/// 残りの馬で正規化して使う。λ は 2024 年の JRA 391 レースで当てはめた値（backtest 参照）。
+pub mod harville {
+    pub const LAMBDA2: f64 = 0.90;
+    pub const LAMBDA3: f64 = 0.70;
+
+    pub fn normalize(v: &[f64]) -> Vec<f64> {
+        let sum: f64 = v.iter().sum();
+        if sum <= 0.0 {
+            return vec![1.0 / v.len().max(1) as f64; v.len()];
+        }
+        v.iter().map(|x| x / sum).collect()
+    }
+
+    pub struct Model {
+        p: Vec<f64>,
+        q2: Vec<f64>,
+        q3: Vec<f64>,
+    }
+
+    fn rest(x: f64) -> f64 {
+        x.max(1e-12)
+    }
+
+    impl Model {
+        /// p は合計 1 の勝率
+        pub fn new(p: &[f64]) -> Self {
+            Self::with_lambda(p, LAMBDA2, LAMBDA3)
+        }
+
+        pub fn with_lambda(p: &[f64], l2: f64, l3: f64) -> Self {
+            Model {
+                p: p.to_vec(),
+                q2: normalize(&p.iter().map(|x| x.max(1e-12).powf(l2)).collect::<Vec<_>>()),
+                q3: normalize(&p.iter().map(|x| x.max(1e-12).powf(l3)).collect::<Vec<_>>()),
+            }
+        }
+
+        /// i が1着、j が2着
+        pub fn exacta(&self, i: usize, j: usize) -> f64 {
+            self.p[i] * self.q2[j] / rest(1.0 - self.q2[i])
+        }
+
+        /// i, j, k の順で1-2-3着
+        pub fn trifecta(&self, i: usize, j: usize, k: usize) -> f64 {
+            self.exacta(i, j) * self.q3[k] / rest(1.0 - self.q3[i] - self.q3[j])
+        }
+
+        /// 馬連: i と j が1-2着（順不同）
+        pub fn quinella(&self, i: usize, j: usize) -> f64 {
+            self.exacta(i, j) + self.exacta(j, i)
+        }
+
+        /// 3連複: i, j, k が1-2-3着（順不同）
+        pub fn trio(&self, i: usize, j: usize, k: usize) -> f64 {
+            self.trifecta(i, j, k)
+                + self.trifecta(i, k, j)
+                + self.trifecta(j, i, k)
+                + self.trifecta(j, k, i)
+                + self.trifecta(k, i, j)
+                + self.trifecta(k, j, i)
+        }
+
+        /// ワイド: i と j がともに3着以内
+        pub fn wide(&self, i: usize, j: usize) -> f64 {
+            (0..self.p.len())
+                .filter(|&k| k != i && k != j)
+                .map(|k| self.trio(i, j, k))
+                .sum()
+        }
+
+        /// 各馬の3着以内率
+        pub fn top3(&self) -> Vec<f64> {
+            let n = self.p.len();
+            let mut out = vec![0.0; n];
+            for i in 0..n {
+                for j in 0..n {
+                    if j == i {
+                        continue;
+                    }
+                    for k in 0..n {
+                        if k == i || k == j {
+                            continue;
+                        }
+                        let pr = self.trifecta(i, j, k);
+                        out[i] += pr;
+                        out[j] += pr;
+                        out[k] += pr;
+                    }
+                }
+            }
+            out
+        }
+    }
+}
+
+/// 勝率モデルの特徴量。5項目スコアと過去走から作り、レース内で標準化してから使う。
+pub const FEATURE_NAMES: [&str; N_FEATURES] = [
+    "能力", "時計", "適性", "騎手・枠", "展開", "着差", "過去人気", "着順率", "出走数", "斤量差",
+    "指数(最高)", "指数(平均)", "間隔", "距離変更", "芝ダ替わり", "騎手3着内率", "父の芝ダ3着内率",
+];
+pub const N_FEATURES: usize = 17;
+/// 各特徴量がどの重みスライダー（0=能力 1=時計 2=適性 3=騎手・枠 4=展開）に属するか
+pub const FEATURE_GROUP: [usize; N_FEATURES] = [0, 1, 2, 3, 4, 0, 0, 0, 0, 3, 1, 1, 0, 2, 2, 3, 2];
+/// 条件付きロジット（1着の多項ロジット）の係数。2023〜2025 年の JRA 1518 レースで当てはめた（L2 正則化 0.2）。
+/// 時系列ローリング検証（189レース×4区間）の1着対数損失は平均 2.170
+/// （5項目＋過去走だけなら 2.201、単勝オッズそのものは 1.875）。
+/// 間隔・距離変更・芝ダ替わりは検証で効かず、展開は係数が負になったので 0。
+/// 再学習: `cargo run --release --example backtest -- <races.jsonl>... --write-std src/std_times.rs` の出力を貼る。
+pub const MODEL_BETA: [f64; N_FEATURES] = [0.165, 0.135, 0.167, 0.061, 0.0, -0.082, -0.165, -0.121, -0.055, -0.001, 0.101, 0.098, 0.0, 0.0, 0.0, 0.246, 0.217];
+
+/// 過去走から作る特徴量: [着差, 過去人気, 着順率, 出走数, 斤量差]
+pub fn past_features(e: &HorseEntry, field_carried_weight: f64) -> [f64; 5] {
+    let runs: Vec<_> = e.past_runs.iter().take(5).collect();
+    let rw = [1.0, 0.8, 0.6, 0.45, 0.35];
+    let wavg = |f: &dyn Fn(&crate::models::PastRun) -> Option<f64>, default: f64| -> f64 {
+        let (mut s, mut w) = (0.0, 0.0);
+        for (i, r) in runs.iter().enumerate() {
+            if let Some(v) = f(r) {
+                s += v * rw[i];
+                w += rw[i];
+            }
+        }
+        if w > 0.0 {
+            s / w
+        } else {
+            default
+        }
+    };
+    // 勝ち馬との着差（秒）。勝った走りは 0、大敗は 3 秒で頭打ち
+    let margin = wavg(&|r| r.margin.map(|m| m.clamp(0.0, 3.0)), 1.5);
+    // 過去の人気: log(人気/頭数)。小さいほど支持されていた
+    let pop = wavg(
+        &|r| match (r.popularity, r.head_count) {
+            (Some(p), Some(h)) if h > 0 => Some(((p as f64) / (h as f64)).ln()),
+            _ => None,
+        },
+        -0.7,
+    );
+    // 着順率（0 が1着、1 が最下位）
+    let fin = wavg(
+        &|r| match (r.finish_rank, r.head_count) {
+            (Some(f), Some(h)) if h > 1 => Some((f as f64 - 1.0) / (h as f64 - 1.0)),
+            _ => None,
+        },
+        0.5,
+    );
+    [margin, pop, fin, runs.len() as f64, e.carried_weight - field_carried_weight]
+}
+
+/// コース・距離ごとの基準タイムと、馬場状態による補正。過去走のタイムを「1000m あたり何秒速いか」に直す。
+pub struct StdTimes {
+    base: std::collections::HashMap<String, f64>,
+    going: std::collections::HashMap<String, f64>,
+    /// 騎手（フルネーム）→ (騎乗数, 3着以内数)
+    jockey: std::collections::HashMap<String, (u32, u32)>,
+    /// 「父|芝ダ」→ (出走数, 3着以内数)。確定レースの結果から作る
+    sire: std::collections::HashMap<String, (u32, u32)>,
+}
+
+fn std_key(r: &crate::models::PastRun) -> String {
+    format!("{}|{}|{}", r.venue, r.surface, r.distance)
+}
+
+fn median(v: &mut [f64]) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v[v.len() / 2]
+}
+
+impl StdTimes {
+    /// 過去走の集まりから基準タイム（中央値）を作る。8 走未満のコースは使わない。
+    pub fn fit<'a>(runs: impl Iterator<Item = &'a crate::models::PastRun>) -> Self {
+        let runs: Vec<&crate::models::PastRun> = runs
+            .filter(|r| r.time_sec.is_some() && r.distance >= 800 && r.surface != "障")
+            .collect();
+        let mut by: std::collections::HashMap<String, Vec<f64>> = Default::default();
+        for r in &runs {
+            if r.track_cond == "良" {
+                by.entry(std_key(r)).or_default().push(r.time_sec.unwrap());
+            }
+        }
+        let base: std::collections::HashMap<String, f64> = by
+            .into_iter()
+            .filter(|(_, v)| v.len() >= 8)
+            .map(|(k, mut v)| (k, median(&mut v)))
+            .collect();
+        let mut gv: std::collections::HashMap<String, Vec<f64>> = Default::default();
+        for r in &runs {
+            if let Some(b) = base.get(&std_key(r)) {
+                let per_km = (r.time_sec.unwrap() - b) / r.distance as f64 * 1000.0;
+                gv.entry(format!("{}|{}", r.surface, r.track_cond)).or_default().push(per_km);
+            }
+        }
+        let going = gv
+            .into_iter()
+            .filter(|(_, v)| v.len() >= 20)
+            .map(|(k, mut v)| (k, median(&mut v)))
+            .collect();
+        // 騎手の成績。同じ馬・同じ日の走りは一度だけ数える
+        let mut seen = std::collections::HashSet::new();
+        let mut jockey: std::collections::HashMap<String, (u32, u32)> = Default::default();
+        for r in &runs {
+            if r.jockey.is_empty() || !seen.insert((r.date.clone(), r.venue.clone(), r.race_name.clone(), r.horse_num)) {
+                continue;
+            }
+            if let Some(f) = r.finish_rank {
+                let e = jockey.entry(r.jockey.clone()).or_default();
+                e.0 += 1;
+                if f <= 3 {
+                    e.1 += 1;
+                }
+            }
+        }
+        jockey.retain(|_, v| v.0 >= 5);
+        StdTimes { base, going, jockey, sire: Default::default() }
+    }
+
+    /// 確定レースの結果を父馬の成績表に足す
+    pub fn add_results(&mut self, info: &RaceInfo, entries: &[HorseEntry]) {
+        for e in entries {
+            if e.sire.is_empty() {
+                continue;
+            }
+            if let Some(f) = e.actual_rank {
+                let v = self.sire.entry(format!("{}|{}", e.sire, info.surface)).or_default();
+                v.0 += 1;
+                if f <= 3 {
+                    v.1 += 1;
+                }
+            }
+        }
+    }
+
+    pub fn sire_top3(&self, sire: &str, surface: &str) -> f64 {
+        const PRIOR: f64 = 0.21;
+        const K: f64 = 40.0;
+        let (n, t) = self.sire.get(&format!("{}|{}", sire, surface)).copied().unwrap_or((0, 0));
+        (t as f64 + PRIOR * K) / (n as f64 + K)
+    }
+
+    /// 騎手の3着内率（騎乗数が少ない騎手は全体平均 0.25 に寄せる）。出馬表の略称は前方一致で探す
+    pub fn jockey_top3(&self, name: &str) -> f64 {
+        const PRIOR: f64 = 0.25;
+        const K: f64 = 30.0;
+        if name.is_empty() {
+            return PRIOR;
+        }
+        let (mut rides, mut top3) = (0u32, 0u32);
+        for (full, (n, t)) in &self.jockey {
+            if full.starts_with(name) || name.starts_with(full.as_str()) {
+                rides += n;
+                top3 += t;
+            }
+        }
+        (top3 as f64 + PRIOR * K) / (rides as f64 + K)
+    }
+
+    pub fn from_tables(
+        base: &[(&str, f64)],
+        going: &[(&str, f64)],
+        jockey: &[(&str, u32, u32)],
+        sire: &[(&str, u32, u32)],
+    ) -> Self {
+        StdTimes {
+            base: base.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            going: going.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            jockey: jockey.iter().map(|(k, n, t)| (k.to_string(), (*n, *t))).collect(),
+            sire: sire.iter().map(|(k, n, t)| (k.to_string(), (*n, *t))).collect(),
+        }
+    }
+
+    /// 1000m あたり基準より何秒速かったか（大きいほど速い）。馬場状態の分は差し引く。
+    pub fn figure(&self, r: &crate::models::PastRun) -> Option<f64> {
+        let t = r.time_sec?;
+        let b = self.base.get(&std_key(r))?;
+        let per_km = (b - t) / r.distance as f64 * 1000.0;
+        let g = self.going.get(&format!("{}|{}", r.surface, r.track_cond)).copied().unwrap_or(0.0);
+        Some((per_km + g).clamp(-6.0, 6.0))
+    }
+
+    /// std_times.rs の中身として書き出す
+    pub fn to_rust_source(&self) -> String {
+        let mut b: Vec<_> = self.base.iter().collect();
+        b.sort_by(|x, y| x.0.cmp(y.0));
+        let mut g: Vec<_> = self.going.iter().collect();
+        g.sort_by(|x, y| x.0.cmp(y.0));
+        let mut s = String::from("//! 基準タイム表（自動生成）。`cargo run --release --example backtest -- <races.jsonl...> --write-std src/std_times.rs` で作り直す。\npub const BASE: &[(&str, f64)] = &[\n");
+        for (k, v) in b {
+            s += &format!("    ({:?}, {:.2}),\n", k, v);
+        }
+        s += "];\npub const GOING: &[(&str, f64)] = &[\n";
+        for (k, v) in g {
+            s += &format!("    ({:?}, {:.3}),\n", k, v);
+        }
+        s += "];\npub const JOCKEY: &[(&str, u32, u32)] = &[\n";
+        let mut j: Vec<_> = self.jockey.iter().collect();
+        j.sort_by(|x, y| x.0.cmp(y.0));
+        for (k, (n, t)) in j {
+            s += &format!("    ({:?}, {}, {}),\n", k, n, t);
+        }
+        s += "];\npub const SIRE: &[(&str, u32, u32)] = &[\n";
+        let mut sr: Vec<_> = self.sire.iter().filter(|(_, v)| v.0 >= 5).collect();
+        sr.sort_by(|x, y| x.0.cmp(y.0));
+        for (k, (n, t)) in sr {
+            s += &format!("    ({:?}, {}, {}),\n", k, n, t);
+        }
+        s += "];\n";
+        s
+    }
+}
+
+/// アプリに同梱した基準タイム表
+pub static STD_TIMES: std::sync::LazyLock<StdTimes> =
+    std::sync::LazyLock::new(|| StdTimes::from_tables(crate::std_times::BASE, crate::std_times::GOING, crate::std_times::JOCKEY, crate::std_times::SIRE));
+
+fn parse_ymd(s: &str) -> Option<chrono::NaiveDate> {
+    let n: Vec<i32> = s
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|x| !x.is_empty())
+        .filter_map(|x| x.parse().ok())
+        .collect();
+    if n.len() >= 3 {
+        chrono::NaiveDate::from_ymd_opt(n[0], n[1] as u32, n[2] as u32)
+    } else {
+        None
+    }
+}
+
+/// 時計・ローテーションの特徴量: [指数(最高), 指数(平均), 間隔(log日数), 距離変更, 芝ダ替わり]
+pub fn form_features(e: &HorseEntry, info: &RaceInfo, std: &StdTimes) -> [f64; 5] {
+    let figs: Vec<f64> = e.past_runs.iter().take(3).filter_map(|r| std.figure(r)).collect();
+    let (best, avg) = if figs.is_empty() {
+        (-1.0, -1.0) // 時計のない馬は控えめに置く
+    } else {
+        (
+            figs.iter().cloned().fold(f64::MIN, f64::max),
+            figs.iter().sum::<f64>() / figs.len() as f64,
+        )
+    };
+    let last = e.past_runs.first();
+    let rest = match (last.and_then(|r| parse_ymd(&r.date)), parse_ymd(&info.date_str)) {
+        (Some(a), Some(b)) if b > a => ((b - a).num_days() as f64).ln(),
+        _ => (60.0f64).ln(),
+    };
+    let dist_change = last.map(|r| ((info.distance as f64 - r.distance as f64).abs() / 400.0).min(3.0)).unwrap_or(0.0);
+    let surf_change = last.map(|r| if r.surface != info.surface { 1.0 } else { 0.0 }).unwrap_or(0.0);
+    [best, avg, rest, dist_change, surf_change]
+}
+
+/// 1頭分の特徴量（標準化前）
+pub fn feature_row(p: &HorsePrediction, info: &RaceInfo, field_carried_weight: f64, std: &StdTimes) -> Vec<f64> {
+    let mut v = vec![p.ability_score, p.speed_score, p.aptitude_score, p.jockey_frame_score, p.pace_score];
+    v.extend(past_features(&p.entry, field_carried_weight));
+    v.extend(form_features(&p.entry, info, std));
+    let j = std.jockey_top3(&p.entry.jockey_name);
+    v.push((j / (1.0 - j)).ln());
+    let sr = std.sire_top3(&p.entry.sire, &info.surface);
+    v.push((sr / (1.0 - sr)).ln());
+    v
+}
+
+/// 列ごとにレース内で平均 0・標準偏差 1 にそろえる
+pub fn standardize(rows: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let n = rows.len() as f64;
+    let k = rows[0].len();
+    let mut out = rows.to_vec();
+    for j in 0..k {
+        let m = rows.iter().map(|r| r[j]).sum::<f64>() / n;
+        let sd = (rows.iter().map(|r| (r[j] - m).powi(2)).sum::<f64>() / n).sqrt();
+        for (i, r) in rows.iter().enumerate() {
+            out[i][j] = if sd > 1e-9 { (r[j] - m) / sd } else { 0.0 };
+        }
+    }
+    out
+}
 
 pub fn run_prediction(
     race_info: RaceInfo,
@@ -11,6 +399,7 @@ pub fn run_prediction(
     budget: u32,
     strategy: String,
     memo: String,
+    combo_odds: ComboOdds,
 ) -> RacePredictionResult {
     let pace_analysis = analyze_pace(&race_info, &entries);
 
@@ -108,53 +497,65 @@ pub fn run_prediction(
         });
     }
 
-    // Compute T-score (偏差値 total_index) and Softmax win_prob among active horses
-    let active_scores: Vec<f64> = preds
-        .iter()
-        .filter(|p| !p.entry.is_scratched)
-        .map(|p| p.raw_score)
+    // 勝率: 特徴量をレース内で標準化し、当てはめた係数で効用を出して softmax する。
+    // 重みスライダーは、既定値との比で各グループの係数を伸び縮みさせる。
+    let active_idx: Vec<usize> = (0..preds.len())
+        .filter(|&i| !preds[i].entry.is_scratched)
         .collect();
-
-    let n = active_scores.len().max(1) as f64;
-    let mean = active_scores.iter().sum::<f64>() / n;
-    let variance = active_scores
+    let field_cw = if active_idx.is_empty() {
+        0.0
+    } else {
+        active_idx.iter().map(|&i| preds[i].entry.carried_weight).sum::<f64>() / active_idx.len() as f64
+    };
+    let rows: Vec<Vec<f64>> = active_idx
         .iter()
-        .map(|s| (s - mean).powi(2))
-        .sum::<f64>()
-        / n;
-    let std_dev = variance.sqrt().max(4.5);
-
-    // Blend model score with slight market prior if odds are present so win_prob is well-calibrated
-    let temp = 8.5;
-    let mut exp_weights: Vec<f64> = Vec::with_capacity(preds.len());
-    for p in &preds {
-        if p.entry.is_scratched {
-            exp_weights.push(0.0);
-        } else {
-            let z = (p.raw_score - mean) / std_dev;
-            let t_score = (50.0 + z * 10.0).clamp(25.0, 82.0);
-            let w = ((t_score - 50.0) / temp).exp();
-            exp_weights.push(w);
-        }
+        .map(|&i| feature_row(&preds[i], &race_info, field_cw, &STD_TIMES))
+        .collect();
+    let z = standardize(&rows);
+    let d = ScoringWeights::default();
+    let w_total = (weights.ability + weights.speed + weights.aptitude + weights.jockey_frame + weights.pace).max(1e-9);
+    let d_total = d.ability + d.speed + d.aptitude + d.jockey_frame + d.pace;
+    let group_scale = |g: usize| -> f64 {
+        let (w, dw) = match g {
+            0 => (weights.ability, d.ability),
+            1 => (weights.speed, d.speed),
+            2 => (weights.aptitude, d.aptitude),
+            3 => (weights.jockey_frame, d.jockey_frame),
+            _ => (weights.pace, d.pace),
+        };
+        (w / w_total) / (dw / d_total)
+    };
+    let utility: Vec<f64> = z
+        .iter()
+        .map(|row| {
+            row.iter()
+                .enumerate()
+                .map(|(f, x)| MODEL_BETA[f] * group_scale(FEATURE_GROUP[f]) * x)
+                .sum()
+        })
+        .collect();
+    for (a, &i) in active_idx.iter().enumerate() {
+        preds[i].raw_score = utility[a];
     }
-    let sum_exp: f64 = exp_weights.iter().sum::<f64>().max(1e-6);
+    let n = utility.len().max(1) as f64;
+    let mean = utility.iter().sum::<f64>() / n;
+    let std_dev = (utility.iter().map(|u| (u - mean).powi(2)).sum::<f64>() / n).sqrt().max(1e-6);
+    let umax = utility.iter().cloned().fold(f64::MIN, f64::max);
+    let win_probs = harville::normalize(&utility.iter().map(|u| (u - umax).exp()).collect::<Vec<_>>());
+    let top3_probs = harville::Model::new(&win_probs).top3();
 
-    for (i, p) in preds.iter_mut().enumerate() {
-        if p.entry.is_scratched {
-            continue;
-        }
-        let z = (p.raw_score - mean) / std_dev;
-        p.total_index = ((50.0 + z * 10.0) * 10.0).round() / 10.0;
-        let model_win_prob = (exp_weights[i] / sum_exp).clamp(0.005, 0.75);
-        p.win_prob = (model_win_prob * 1000.0).round() / 1000.0;
-        p.top3_prob = ((model_win_prob * 2.65).powf(0.82)).clamp(0.02, 0.92);
-        p.top3_prob = (p.top3_prob * 1000.0).round() / 1000.0;
+    for (a, &i) in active_idx.iter().enumerate() {
+        let p = &mut preds[i];
+        let zs = (p.raw_score - mean) / std_dev;
+        p.total_index = ((50.0 + zs * 10.0) * 10.0).round() / 10.0;
+        p.win_prob = (win_probs[a] * 1000.0).round() / 1000.0;
+        p.top3_prob = (top3_probs[a].min(1.0) * 1000.0).round() / 1000.0;
 
         let est_odds = p.entry.win_odds.unwrap_or_else(|| {
-            // Estimate fair odds if pre-sale
-            (0.80 / p.win_prob.max(0.01)).clamp(1.2, 150.0)
+            // 発売前は自分の勝率から払戻率込みの公正オッズを置く（EV は払戻率と同じ値になる）
+            (TAKEOUT_WIN / win_probs[a].max(0.002)).clamp(1.0, 999.9)
         });
-        p.expected_value = ((p.win_prob * est_odds) * 100.0).round() / 100.0;
+        p.expected_value = ((win_probs[a] * est_odds) * 100.0).round() / 100.0;
 
         p.value_rank = if p.expected_value >= 1.35 && p.total_index >= 51.0 {
             "S".to_string()
@@ -223,6 +624,7 @@ pub fn run_prediction(
         &strategy,
         &official_payouts,
         race_info.is_finished,
+        &combo_odds,
     );
 
     let total_bet: u32 = recommendations.iter().map(|r| r.suggested_amount).sum();
@@ -237,6 +639,7 @@ pub fn run_prediction(
         None
     };
 
+    let race_info_is_finished = race_info.is_finished;
     let roi_percent = total_return.map(|ret| {
         if total_bet > 0 {
             ((ret as f64 / total_bet as f64) * 1000.0).round() / 10.0
@@ -262,7 +665,48 @@ pub fn run_prediction(
         roi_percent,
         memo,
         saved_at: None,
+        pre_race: !race_info_is_finished,
+        combo_odds,
     }
+}
+
+/// 保存済みの予想に確定結果を当てはめる。買い目は作り直さず、保存時のものをそのまま採点する。
+pub fn apply_official_result(
+    mut result: RacePredictionResult,
+    rows: &[ResultRow],
+    payouts: Vec<OfficialPayoutItem>,
+) -> RacePredictionResult {
+    for row in rows {
+        if let Some(p) = result
+            .predictions
+            .iter_mut()
+            .find(|p| p.entry.umaban == row.umaban)
+        {
+            p.entry.actual_rank = Some(row.rank);
+            if row.time.is_some() {
+                p.entry.actual_time = row.time.clone();
+            }
+            if row.last_3f.is_some() {
+                p.entry.actual_last_3f = row.last_3f;
+            }
+        }
+    }
+    result.race_info.is_finished = true;
+    verify_recommendations_with_payouts(&mut result.recommendations, &payouts);
+    result.official_payouts = payouts;
+    let total_return: u32 = result
+        .recommendations
+        .iter()
+        .map(|r| r.actual_return.unwrap_or(0))
+        .sum();
+    result.total_bet = result.recommendations.iter().map(|r| r.suggested_amount).sum();
+    result.total_return = Some(total_return);
+    result.roi_percent = Some(if result.total_bet > 0 {
+        ((total_return as f64 / result.total_bet as f64) * 1000.0).round() / 10.0
+    } else {
+        0.0
+    });
+    result
 }
 
 fn compute_ability_score(entry: &HorseEntry, reasons: &mut Vec<String>) -> f64 {
@@ -328,16 +772,9 @@ fn compute_ability_score(entry: &HorseEntry, reasons: &mut Vec<String>) -> f64 {
         weight_total += w;
     }
 
-    let mut score = weighted_sum / weight_total.max(1.0);
+    let score = weighted_sum / weight_total.max(1.0);
 
-    // Slight market consensus adjustment when official/live odds exist
-    if let Some(odds) = entry.win_odds {
-        if odds <= 2.0 {
-            score += 5.0;
-        } else if odds <= 4.5 {
-            score += 2.5;
-        }
-    }
+    // 単勝オッズによる加点はしない（市場の評価をモデルに混ぜると、期待値の計算で二重に数えるため）
 
     let score = score.clamp(20.0, 99.0);
     if g1_top3 {
@@ -632,198 +1069,138 @@ pub fn generate_recommendations(
     strategy: &str,
     official_payouts: &[OfficialPayoutItem],
     is_finished: bool,
+    combo_odds: &ComboOdds,
 ) -> Vec<BetRecommendation> {
     let active: Vec<&HorsePrediction> = preds.iter().filter(|p| !p.entry.is_scratched).collect();
     if active.len() < 3 {
         return Vec::new();
     }
 
-    let honmei = active[0]; // ◎
-    let taikou = active[1]; // ○
-    let tanana = active[2]; // ▲
+    // モデル勝率（合計 1）と、単勝オッズから逆算した市場の勝率（全頭のオッズがあるときだけ）
+    let model_p = harville::normalize(&active.iter().map(|p| p.win_prob).collect::<Vec<_>>());
+    let market_p: Option<Vec<f64>> = active
+        .iter()
+        .map(|p| p.entry.win_odds.filter(|&o| o > 0.0).map(|o| 1.0 / o))
+        .collect::<Option<Vec<_>>>()
+        .map(|v| harville::normalize(&v));
+    // 推定オッズは市場の勝率から作る。市場がなければモデル勝率から作る（このとき EV は払戻率に等しく、判断材料にならない）
+    let odds_basis: &[f64] = market_p.as_deref().unwrap_or(&model_p);
+    let hm = harville::Model::new(&model_p);
+    let hb = harville::Model::new(odds_basis);
+
+    let honmei = 0;
+    let taikou = 1;
+    let tanana = 2;
     let star = active
         .iter()
-        .find(|p| p.mark == "☆")
-        .copied()
-        .unwrap_or_else(|| active.get(3).copied().unwrap_or(tanana));
-    let renka1 = active
-        .iter()
-        .find(|p| p.mark == "△")
-        .copied()
-        .unwrap_or(star);
+        .position(|p| p.mark == "☆")
+        .unwrap_or(if active.len() > 3 { 3 } else { tanana });
+    let renka1 = active.iter().position(|p| p.mark == "△").unwrap_or(star);
 
-    let mut recs = Vec::new();
+    let mut recs: Vec<BetRecommendation> = Vec::new();
 
-    // Helper for Harville exact/unordered pair & trio probabilities
-    let pair_prob = |a: &HorsePrediction, b: &HorsePrediction| -> f64 {
-        let pa = a.win_prob.clamp(0.01, 0.70);
-        let pb = b.win_prob.clamp(0.01, 0.70);
-        let p_ab = pa * (pb / (1.0 - pa).max(0.05));
-        let p_ba = pb * (pa / (1.0 - pb).max(0.05));
-        (p_ab + p_ba).clamp(0.005, 0.65)
-    };
-
-    let wide_prob = |a: &HorsePrediction, b: &HorsePrediction| -> f64 {
-        (pair_prob(a, b) * 2.55).clamp(0.01, 0.80)
-    };
-
-    let trio_prob = |a: &HorsePrediction, b: &HorsePrediction, c: &HorsePrediction| -> f64 {
-        let p_ab = pair_prob(a, b);
-        let pc = c.win_prob.clamp(0.01, 0.50);
-        (p_ab * (pc * 2.8)).clamp(0.002, 0.45)
-    };
-
-    let est_win_odds = |p: &HorsePrediction| -> f64 {
-        p.entry
-            .win_odds
-            .unwrap_or_else(|| (0.80 / p.win_prob.max(0.01)).clamp(1.3, 120.0))
+    let push = |bet_type: &str, idx: &[usize], conf: &str, recs: &mut Vec<BetRecommendation>| {
+        let mut uniq = idx.to_vec();
+        uniq.sort_unstable();
+        uniq.dedup();
+        if uniq.len() != idx.len() {
+            return;
+        }
+        let horses_unsorted: Vec<u32> = idx.iter().map(|&i| active[i].entry.umaban).collect();
+        let mut horses = horses_unsorted.clone();
+        if bet_type != "単勝" {
+            horses.sort_unstable();
+        }
+        if recs.iter().any(|r| r.bet_type == bet_type && r.horses == horses) {
+            return;
+        }
+        let key = combo_key(&horses);
+        let (hit_prob, real_odds, basis_prob, takeout) = match bet_type {
+            "単勝" => (
+                model_p[idx[0]],
+                active[idx[0]].entry.win_odds,
+                odds_basis[idx[0]],
+                TAKEOUT_WIN,
+            ),
+            "馬連" => (
+                hm.quinella(idx[0], idx[1]),
+                combo_odds.umaren.get(&key).copied(),
+                hb.quinella(idx[0], idx[1]),
+                TAKEOUT_UMAREN,
+            ),
+            "ワイド" => (
+                hm.wide(idx[0], idx[1]),
+                combo_odds.wide.get(&key).copied(),
+                hb.wide(idx[0], idx[1]),
+                TAKEOUT_WIDE,
+            ),
+            _ => (
+                hm.trio(idx[0], idx[1], idx[2]),
+                combo_odds.sanrenpuku.get(&key).copied(),
+                hb.trio(idx[0], idx[1], idx[2]),
+                TAKEOUT_TRIO,
+            ),
+        };
+        let (odds, estimated) = match real_odds {
+            Some(o) => (o, false),
+            None => ((takeout / basis_prob.max(1e-6)).clamp(1.0, 99_999.0), true),
+        };
+        let odds = (odds * 10.0).round() / 10.0;
+        let combination_text = if bet_type == "単勝" {
+            format!("{} ({})", horses[0], active[idx[0]].mark)
+        } else {
+            horses
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(" - ")
+        };
+        recs.push(BetRecommendation {
+            bet_type: bet_type.to_string(),
+            horses,
+            horse_names: idx.iter().map(|&i| active[i].entry.horse_name.clone()).collect(),
+            combination_text,
+            est_hit_prob: (hit_prob * 1000.0).round() / 1000.0,
+            est_odds: odds,
+            expected_value: ((hit_prob * odds) * 100.0).round() / 100.0,
+            suggested_amount: 0,
+            confidence: conf.to_string(),
+            is_hit: None,
+            actual_payout_per_100: None,
+            actual_return: None,
+            odds_is_estimated: estimated,
+        });
     };
 
     // 1. 単勝 (◎ or ☆ depending on strategy)
-    let tan_target = if strategy == "value_focus" && star.expected_value > honmei.expected_value {
+    let tan_target = if strategy == "value_focus"
+        && active[star].expected_value > active[honmei].expected_value
+    {
         star
     } else {
         honmei
     };
-    let tan_odds = est_win_odds(tan_target);
-    recs.push(BetRecommendation {
-        bet_type: "単勝".to_string(),
-        horses: vec![tan_target.entry.umaban],
-        horse_names: vec![tan_target.entry.horse_name.clone()],
-        combination_text: format!("{} ({})", tan_target.entry.umaban, tan_target.mark),
-        est_hit_prob: tan_target.win_prob,
-        est_odds: (tan_odds * 10.0).round() / 10.0,
-        expected_value: ((tan_target.win_prob * tan_odds) * 100.0).round() / 100.0,
-        suggested_amount: 0,
-        confidence: if tan_target.mark == "◎" {
-            "本命勝負".to_string()
-        } else {
-            "高期待値単勝".to_string()
-        },
-        is_hit: None,
-        actual_payout_per_100: None,
-        actual_return: None,
-    });
+    let tan_conf = if active[tan_target].mark == "◎" {
+        "本命勝負"
+    } else {
+        "高期待値単勝"
+    };
+    push("単勝", &[tan_target], tan_conf, &mut recs);
 
     // 2. 馬連 (◎-○, ◎-▲, ◎-☆)
-    let umaren_targets = [
-        (honmei, taikou, "本線"),
-        (honmei, tanana, "対抗押さえ"),
-        (honmei, star, "妙味狙い"),
-    ];
-    for (a, b, conf) in umaren_targets {
-        if a.entry.umaban == b.entry.umaban {
-            continue;
-        }
-        let mut h = vec![a.entry.umaban, b.entry.umaban];
-        h.sort();
-        if recs
-            .iter()
-            .any(|r: &BetRecommendation| r.bet_type == "馬連" && r.horses == h)
-        {
-            continue;
-        }
-        let prob = pair_prob(a, b);
-        let oa = est_win_odds(a);
-        let ob = est_win_odds(b);
-        let est_o = ((oa * ob * 0.42).clamp(1.5, 500.0) * 10.0).round() / 10.0;
-        let ev = ((prob * est_o) * 100.0).round() / 100.0;
-        recs.push(BetRecommendation {
-            bet_type: "馬連".to_string(),
-            horses: h.clone(),
-            horse_names: vec![a.entry.horse_name.clone(), b.entry.horse_name.clone()],
-            combination_text: format!("{} - {}", h[0], h[1]),
-            est_hit_prob: (prob * 1000.0).round() / 1000.0,
-            est_odds: est_o,
-            expected_value: ev,
-            suggested_amount: 0,
-            confidence: conf.to_string(),
-            is_hit: None,
-            actual_payout_per_100: None,
-            actual_return: None,
-        });
-    }
+    push("馬連", &[honmei, taikou], "本線", &mut recs);
+    push("馬連", &[honmei, tanana], "対抗押さえ", &mut recs);
+    push("馬連", &[honmei, star], "妙味狙い", &mut recs);
 
     // 3. ワイド (◎-○, ◎-☆)
-    let wide_targets = [(honmei, taikou, "鉄板ワイド"), (honmei, star, "穴ワイド妙味")];
-    for (a, b, conf) in wide_targets {
-        if a.entry.umaban == b.entry.umaban {
-            continue;
-        }
-        let mut h = vec![a.entry.umaban, b.entry.umaban];
-        h.sort();
-        if recs
-            .iter()
-            .any(|r: &BetRecommendation| r.bet_type == "ワイド" && r.horses == h)
-        {
-            continue;
-        }
-        let prob = wide_prob(a, b);
-        let oa = est_win_odds(a);
-        let ob = est_win_odds(b);
-        let est_o = ((oa * ob * 0.16).clamp(1.2, 150.0) * 10.0).round() / 10.0;
-        let ev = ((prob * est_o) * 100.0).round() / 100.0;
-        recs.push(BetRecommendation {
-            bet_type: "ワイド".to_string(),
-            horses: h.clone(),
-            horse_names: vec![a.entry.horse_name.clone(), b.entry.horse_name.clone()],
-            combination_text: format!("{} - {}", h[0], h[1]),
-            est_hit_prob: (prob * 1000.0).round() / 1000.0,
-            est_odds: est_o,
-            expected_value: ev,
-            suggested_amount: 0,
-            confidence: conf.to_string(),
-            is_hit: None,
-            actual_payout_per_100: None,
-            actual_return: None,
-        });
-    }
+    push("ワイド", &[honmei, taikou], "鉄板ワイド", &mut recs);
+    push("ワイド", &[honmei, star], "穴ワイド妙味", &mut recs);
 
     // 4. 3連複 (◎-○-▲, ◎-○-☆, ◎-▲-☆, ◎-○-△)
-    let fuku3_targets = [
-        (honmei, taikou, tanana, "3連複本線"),
-        (honmei, taikou, star, "3連複中穴"),
-        (honmei, tanana, star, "3連複高配当"),
-        (honmei, taikou, renka1, "3連複押さえ"),
-    ];
-    for (a, b, c, conf) in fuku3_targets {
-        let mut h = vec![a.entry.umaban, b.entry.umaban, c.entry.umaban];
-        h.sort();
-        h.dedup();
-        if h.len() < 3 {
-            continue;
-        }
-        if recs
-            .iter()
-            .any(|r: &BetRecommendation| r.bet_type == "3連複" && r.horses == h)
-        {
-            continue;
-        }
-        let prob = trio_prob(a, b, c);
-        let oa = est_win_odds(a);
-        let ob = est_win_odds(b);
-        let oc = est_win_odds(c);
-        let est_o = (((oa * ob * oc).powf(0.68) * 0.45).clamp(2.2, 1200.0) * 10.0).round() / 10.0;
-        let ev = ((prob * est_o) * 100.0).round() / 100.0;
-        recs.push(BetRecommendation {
-            bet_type: "3連複".to_string(),
-            horses: h.clone(),
-            horse_names: vec![
-                a.entry.horse_name.clone(),
-                b.entry.horse_name.clone(),
-                c.entry.horse_name.clone(),
-            ],
-            combination_text: format!("{} - {} - {}", h[0], h[1], h[2]),
-            est_hit_prob: (prob * 1000.0).round() / 1000.0,
-            est_odds: est_o,
-            expected_value: ev,
-            suggested_amount: 0,
-            confidence: conf.to_string(),
-            is_hit: None,
-            actual_payout_per_100: None,
-            actual_return: None,
-        });
-    }
+    push("3連複", &[honmei, taikou, tanana], "3連複本線", &mut recs);
+    push("3連複", &[honmei, taikou, star], "3連複中穴", &mut recs);
+    push("3連複", &[honmei, tanana, star], "3連複高配当", &mut recs);
+    push("3連複", &[honmei, taikou, renka1], "3連複押さえ", &mut recs);
 
     // Allocate budget across tickets in 100-yen units according to strategy
     let clean_budget = (budget / 100) * 100;
@@ -895,5 +1272,238 @@ pub fn verify_recommendations_with_payouts(
             rec.actual_payout_per_100 = None;
             rec.actual_return = Some(0);
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::models::{OfficialPayoutItem, PastRun, RaceInfo};
+
+    fn approx(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    pub(crate) fn race_info(finished: bool) -> RaceInfo {
+        RaceInfo {
+            race_id: "202305050812".into(),
+            race_name: "テスト".into(),
+            race_num: "12R".into(),
+            date_str: "2023年11月26日".into(),
+            venue: "東京".into(),
+            grade: None,
+            start_time: "15:40".into(),
+            surface: "芝".into(),
+            distance: 2400,
+            direction: "左".into(),
+            weather: "晴".into(),
+            track_cond: "良".into(),
+            head_count: 6,
+            is_finished: finished,
+            source_url: String::new(),
+        }
+    }
+
+    pub(crate) fn entry(umaban: u32, finish: u32, odds: f64) -> HorseEntry {
+        HorseEntry {
+            waku: umaban,
+            umaban,
+            horse_id: String::new(),
+            horse_name: format!("馬{}", umaban),
+            sex_age: "牡4".into(),
+            carried_weight: 58.0,
+            jockey_name: String::new(),
+            jockey_id: String::new(),
+            trainer_name: String::new(),
+            sire: String::new(),
+            dam: String::new(),
+            broodmare_sire: String::new(),
+            running_style: "先".into(),
+            interval_text: String::new(),
+            body_weight: None,
+            weight_diff: None,
+            win_odds: Some(odds),
+            place_odds_min: None,
+            place_odds_max: None,
+            popularity: None,
+            is_scratched: false,
+            past_runs: vec![PastRun {
+                date: "2023.10.01".into(),
+                venue: "東京".into(),
+                race_name: "前走".into(),
+                grade: None,
+                finish_rank: Some(finish),
+                surface: "芝".into(),
+                distance: 2400,
+                time_str: String::new(),
+                time_sec: None,
+                track_cond: "良".into(),
+                head_count: Some(12),
+                horse_num: None,
+                popularity: None,
+                jockey: String::new(),
+                carried_weight: None,
+                passage: String::new(),
+                last_3f: None,
+                margin: None,
+            }],
+            actual_rank: None,
+            actual_time: None,
+            actual_last_3f: None,
+        }
+    }
+
+    fn field() -> Vec<HorseEntry> {
+        vec![
+            entry(1, 1, 2.5),
+            entry(2, 2, 4.0),
+            entry(3, 4, 6.0),
+            entry(4, 6, 10.0),
+            entry(5, 9, 20.0),
+            entry(6, 12, 40.0),
+        ]
+    }
+
+    #[test]
+    fn harville_probabilities_sum_to_place_counts() {
+        let p = harville::normalize(&[0.4, 0.25, 0.15, 0.1, 0.06, 0.04]);
+        let n = p.len();
+        let h = harville::Model::new(&p);
+        let mut quinella = 0.0;
+        let mut wide = 0.0;
+        let mut trio = 0.0;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                quinella += h.quinella(i, j);
+                wide += h.wide(i, j);
+                for k in (j + 1)..n {
+                    trio += h.trio(i, j, k);
+                }
+            }
+        }
+        assert!(approx(quinella, 1.0), "馬連の合計 {}", quinella);
+        assert!(approx(wide, 3.0), "ワイドの合計 {}", wide);
+        assert!(approx(trio, 1.0), "3連複の合計 {}", trio);
+        assert!(approx(h.top3().iter().sum::<f64>(), 3.0));
+    }
+
+    #[test]
+    fn win_and_top3_probs_are_consistent() {
+        let r = run_prediction(
+            race_info(false),
+            field(),
+            vec![],
+            ScoringWeights::default(),
+            3000,
+            "balance".into(),
+            String::new(),
+            ComboOdds::default(),
+        );
+        let win: f64 = r.predictions.iter().map(|p| p.win_prob).sum();
+        let top3: f64 = r.predictions.iter().map(|p| p.top3_prob).sum();
+        assert!((win - 1.0).abs() < 0.01, "勝率の合計 {}", win);
+        assert!((top3 - 3.0).abs() < 0.01, "3着内率の合計 {}", top3);
+        assert!(r.pre_race);
+        // 単勝は実オッズ、組み合わせは実オッズが無いので推定
+        assert!(r
+            .recommendations
+            .iter()
+            .all(|x| x.odds_is_estimated == (x.bet_type != "単勝")));
+    }
+
+    #[test]
+    fn real_combo_odds_are_used_when_available() {
+        let mut combo = ComboOdds::default();
+        combo.umaren.insert("1-2".into(), 7.7);
+        let r = run_prediction(
+            race_info(false),
+            field(),
+            vec![],
+            ScoringWeights::default(),
+            3000,
+            "balance".into(),
+            String::new(),
+            combo,
+        );
+        let umaren = r
+            .recommendations
+            .iter()
+            .find(|x| x.bet_type == "馬連" && x.horses == vec![1, 2])
+            .expect("◎-○ の馬連がある");
+        assert_eq!(umaren.est_odds, 7.7);
+        assert!(!umaren.odds_is_estimated);
+    }
+
+    #[test]
+    fn finished_race_prediction_is_not_pre_race() {
+        let r = run_prediction(
+            race_info(true),
+            field(),
+            vec![],
+            ScoringWeights::default(),
+            3000,
+            "balance".into(),
+            String::new(),
+            ComboOdds::default(),
+        );
+        assert!(!r.pre_race);
+    }
+
+    #[test]
+    fn applying_result_grades_saved_bets_without_rebuilding_them() {
+        let saved = run_prediction(
+            race_info(false),
+            field(),
+            vec![],
+            ScoringWeights::default(),
+            3000,
+            "balance".into(),
+            String::new(),
+            ComboOdds::default(),
+        );
+        let before: Vec<(String, Vec<u32>, u32)> = saved
+            .recommendations
+            .iter()
+            .map(|r| (r.bet_type.clone(), r.horses.clone(), r.suggested_amount))
+            .collect();
+        let tan = saved
+            .recommendations
+            .iter()
+            .find(|r| r.bet_type == "単勝")
+            .unwrap()
+            .clone();
+        let rows = vec![ResultRow {
+            umaban: tan.horses[0],
+            rank: 1,
+            time: None,
+            last_3f: None,
+            win_odds: Some(99.0),
+            popularity: None,
+        }];
+        let payouts = vec![OfficialPayoutItem {
+            bet_type: "単勝".into(),
+            combination: tan.horses.clone(),
+            combination_text: String::new(),
+            payout_yen: 250,
+            popularity: Some(1),
+        }];
+        let graded = apply_official_result(saved, &rows, payouts);
+        let after: Vec<(String, Vec<u32>, u32)> = graded
+            .recommendations
+            .iter()
+            .map(|r| (r.bet_type.clone(), r.horses.clone(), r.suggested_amount))
+            .collect();
+        assert_eq!(before, after, "買い目が組み直されている");
+        assert!(graded.pre_race);
+        assert!(graded.race_info.is_finished);
+        assert_eq!(
+            graded.total_return,
+            Some(tan.suggested_amount / 100 * 250)
+        );
+        // 確定オッズで保存済みのオッズを上書きしない
+        assert!(graded
+            .predictions
+            .iter()
+            .all(|p| p.entry.win_odds != Some(99.0)));
     }
 }

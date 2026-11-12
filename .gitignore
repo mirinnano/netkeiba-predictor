@@ -17,3 +17,10 @@ Thumbs.db
 .vscode/
 .idea/
 *.log
+
+# Backtest data
+backtest/
+
+# Impeccable working artifacts
+.impeccable/mocks/
+.impeccable/review/
