@@ -109,7 +109,7 @@ internal static class JvDump
 
         string dir = Path.Combine(outRoot, dataspec);
         Directory.CreateDirectory(dir);
-        Dictionary<string, StreamWriter> writers = new Dictionary<string, StreamWriter>();
+        Dictionary<string, FileStream> writers = new Dictionary<string, FileStream>();
         long records = 0;
         int exitCode = 0;
         try
@@ -124,14 +124,13 @@ internal static class JvDump
                 {
                     // 先頭2文字がレコード種別（RA, SE, HR, O1 など）
                     string spec = buff.Length >= 2 ? buff.Substring(0, 2) : "__";
-                    StreamWriter w;
+                    FileStream w;
                     if (!writers.TryGetValue(spec, out w))
                     {
-                        // 位置がバイト単位で決まっている形式なので、Shift_JIS のまま書く
-                        w = new StreamWriter(Path.Combine(dir, spec + ".txt"), true, Sjis);
+                        w = new FileStream(Path.Combine(dir, spec + ".txt"), FileMode.Append, FileAccess.Write);
                         writers[spec] = w;
                     }
-                    w.Write(buff.EndsWith("\n") ? buff : buff + "\r\n");
+                    WriteRecord(w, buff, r);
                     records++;
                     if (records % 10000 == 0)
                     {
@@ -161,7 +160,7 @@ internal static class JvDump
         }
         finally
         {
-            foreach (StreamWriter w in writers.Values)
+            foreach (FileStream w in writers.Values)
             {
                 w.Dispose();
             }
@@ -172,6 +171,28 @@ internal static class JvDump
         // 次回はこの時刻から差分だけ取れる
         File.WriteAllText(Path.Combine(dir, "lastfiletimestamp.txt"), lastTimestamp);
         return exitCode;
+    }
+
+    private static bool reportedPadding = false;
+
+    /// JVRead の戻り値（実際に読んだバイト数）で切り詰めて、Shift_JIS のバイト列のまま書く。
+    /// 受け取る文字列はバッファの大きさまで埋められて返ることがあるので、全部書くと巨大になる。
+    private static void WriteRecord(FileStream w, string buff, int readBytes)
+    {
+        byte[] all = Sjis.GetBytes(buff);
+        int n = Math.Min(readBytes, all.Length);
+        if (!reportedPadding && all.Length > readBytes + 2)
+        {
+            Console.WriteLine();
+            Console.WriteLine("（確認）受け取った長さ " + all.Length + " バイトのうち、レコードは " + readBytes + " バイト");
+            reportedPadding = true;
+        }
+        w.Write(all, 0, n);
+        if (n == 0 || all[n - 1] != (byte)'\n')
+        {
+            w.WriteByte((byte)'\r');
+            w.WriteByte((byte)'\n');
+        }
     }
 
     /// 速報系データ（時系列オッズなど）をキー1件ぶん取り出す
@@ -186,7 +207,7 @@ internal static class JvDump
         string dir = Path.Combine(outRoot, "rt_" + dataspec);
         Directory.CreateDirectory(dir);
         long records = 0;
-        using (StreamWriter w = new StreamWriter(Path.Combine(dir, key + ".txt"), false, Sjis))
+        using (FileStream w = new FileStream(Path.Combine(dir, key + ".txt"), FileMode.Create, FileAccess.Write))
         {
             while (true)
             {
@@ -196,7 +217,7 @@ internal static class JvDump
                 int r = jv.JVRead(ref buff, ref size, ref fileName);
                 if (r > 0)
                 {
-                    w.Write(buff.EndsWith("\n") ? buff : buff + "\r\n");
+                    WriteRecord(w, buff, r);
                     records++;
                 }
                 else if (r == 0)
