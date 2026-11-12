@@ -173,6 +173,26 @@ export interface RacePredictionResult {
   saved_at: string | null;
   /** 確定前の情報だけで作った予想なら true（回収率の集計対象） */
   pre_race: boolean;
+  /** "jravan"（JRA-VAN の履歴で当てはめたモデル）か "basic"（従来の5項目モデル） */
+  model_source?: string;
+  jv_probs?: [number, number][] | null;
+}
+
+export interface JvStatus {
+  path: string | null;
+  races: number;
+  runners: number;
+  last_result_date: string | null;
+  latest_card_date: string | null;
+}
+
+export interface IngestReport {
+  file: string;
+  from: number;
+  to: number;
+  upserted: number;
+  deleted: number;
+  skipped: number;
 }
 
 export interface SavedPredictionSummary {

@@ -205,6 +205,12 @@ pub struct RacePredictionResult {
     pub pre_race: bool,
     #[serde(default)]
     pub combo_odds: ComboOdds,
+    /// 勝率を出したモデル: "jravan"（JRA-VAN の履歴で当てはめたモデル）か "basic"（従来の5項目モデル）
+    #[serde(default)]
+    pub model_source: String,
+    /// JRA-VAN モデルの勝率（馬番, 勝率）。重みを変えて再計算しても勝率を保つために持つ
+    #[serde(default)]
+    pub jv_probs: Option<Vec<(u32, f64)>>,
 }
 
 /// 組み合わせ馬券の実オッズ。キーは昇順の馬番を "-" で連結したもの（例: "1-2", "1-2-3"）。

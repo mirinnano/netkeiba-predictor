@@ -483,3 +483,30 @@ pub fn win_probs(features: &[Vec<f64>], odds: &[Option<f64>]) -> (Vec<f64>, bool
     };
     (softmax(&u), with_market)
 }
+
+/// アプリ用: `until`（yyyymmdd）の前日までの確定成績で Engine を作る
+pub fn build_engine(conn: &rusqlite::Connection, until: u32) -> rusqlite::Result<Engine> {
+    let until_s = until.to_string();
+    let mut races = crate::jvstore::load_races(conn, "20210101", &until_s)?;
+    races.retain(|r| r.kubun == '7');
+    races.sort_by(|a, b| (&a.date, &a.race_id).cmp(&(&b.date, &b.race_id)));
+    let recent_from = {
+        let d = chrono::NaiveDate::from_ymd_opt((until / 10000) as i32, until / 100 % 100, until % 100)
+            .map(|d| d - chrono::Duration::days(150))
+            .map(|d| d.format("%Y%m%d").to_string().parse().unwrap_or(0))
+            .unwrap_or(0);
+        d
+    };
+    let works = crate::jvstore::load_works_for(conn, recent_from)?;
+    let mut engine = Engine::new(&races, works);
+    let mut i = 0;
+    while i < races.len() {
+        let mut j = i;
+        while j < races.len() && races[j].date == races[i].date {
+            j += 1;
+        }
+        engine.add_day(&races[i..j]);
+        i = j;
+    }
+    Ok(engine)
+}

@@ -74,6 +74,26 @@ export function RaceView({
         >
           {info.is_finished ? "確定" : "発走前"}
         </span>
+        <span
+          className={`rounded-sm px-1.5 py-0.5 text-[11px] font-bold ${
+            result.model_source === "jravan" ? "border border-shell text-shell" : "border border-dashed border-ink-faint text-ink-muted"
+          }`}
+          title={
+            result.model_source === "jravan"
+              ? "勝率は JRA-VAN の履歴（2021〜2025年）で当てはめたモデル。オッズがあれば市場の勝率と組み合わせる"
+              : "JRA-VAN のデータベースがないため、従来の5項目モデルで計算しています"
+          }
+        >
+          {result.model_source === "jravan" ? "JRA-VANモデル" : "簡易モデル"}
+        </span>
+        {info.source_url.includes("馬番は仮") && (
+          <span
+            className="rounded-sm bg-warn/10 px-1.5 py-0.5 text-[11px] font-bold text-warn"
+            title="木曜の出走馬名表の段階で、馬番がまだ決まっていません。番号は並び順の仮のもので、買い目の番号もそのままでは使えません"
+          >
+            馬番は仮
+          </span>
+        )}
         {!result.pre_race && (
           <span
             className="rounded-sm border border-dashed border-ink-faint px-1.5 py-0.5 text-[11px] text-ink-muted"

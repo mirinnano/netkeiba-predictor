@@ -1,5 +1,6 @@
 pub mod db;
 pub mod jv_coef;
+pub mod jvapp;
 pub mod jvdata;
 pub mod jvmodel;
 pub mod jvstore;
@@ -40,18 +41,44 @@ async fn get_race_list_by_date(
 
 #[tauri::command]
 async fn analyze_race(
+    app: tauri::AppHandle,
     input: String,
     weights: Option<ScoringWeights>,
     budget: Option<u32>,
     strategy: Option<String>,
 ) -> Result<RacePredictionResult, String> {
-    let (race_info, entries, official_payouts, combo_odds) =
-        scraper::scrape_race_data(&input).await?;
+    let db = app.path().app_data_dir().ok().and_then(|d| jvapp::db_path(&d));
+    // 出馬表とオッズは netkeiba から。取れないときは DB（JRA-VAN の出馬表）にあればそれを使う
+    let (race_info, entries, official_payouts, combo_odds) = match scraper::scrape_race_data(&input).await {
+        Ok(x) => x,
+        Err(e) => {
+            let (race_id, _) = scraper::extract_race_id(&input)?;
+            match db.as_deref().and_then(|p| jvapp::race_from_db(p, &race_id)) {
+                Some((info, entries)) => (info, entries, Vec::new(), models::ComboOdds::default()),
+                None => return Err(e),
+            }
+        }
+    };
     let w = weights.unwrap_or_default();
     let b = budget.unwrap_or(3000);
     let s = strategy.unwrap_or_else(|| "balance".to_string());
 
-    Ok(predictor::run_prediction(
+    // DB があれば JRA-VAN モデルの勝率を使う（数秒かかるので別スレッドで）
+    let jv = match db {
+        Some(p) => {
+            let (info, ents) = (race_info.clone(), entries.clone());
+            tokio::task::spawn_blocking(move || jvapp::jv_probs(&p, &info, &ents))
+                .await
+                .map_err(|e| e.to_string())?
+                .unwrap_or_else(|e| {
+                    eprintln!("JRA-VAN モデルを使えませんでした: {}", e);
+                    None
+                })
+        }
+        None => None,
+    };
+
+    Ok(predictor::run_prediction_with(
         race_info,
         entries,
         official_payouts,
@@ -60,7 +87,32 @@ async fn analyze_race(
         s,
         String::new(),
         combo_odds,
+        jv.as_ref(),
     ))
+}
+
+/// JvDump の出力フォルダ（out）を、アプリのデータフォルダの keiba.db に取り込む（前回の続きから）
+#[tauri::command]
+async fn jv_import(app: tauri::AppHandle, dir: String) -> Result<Vec<jvstore::IngestReport>, String> {
+    let data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&data).map_err(|e| e.to_string())?;
+    let db = jvapp::db_path(&data).unwrap_or_else(|| data.join("keiba.db"));
+    let out = std::path::PathBuf::from(dir.trim());
+    if !out.join("RACE").exists() {
+        return Err(format!("JvDump の出力（RACE フォルダ）が見つかりません: {}", out.display()));
+    }
+    tokio::task::spawn_blocking(move || {
+        let mut conn = jvstore::open(&db).map_err(|e| e.to_string())?;
+        jvstore::ingest_dir(&mut conn, &out).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn jv_status(app: tauri::AppHandle) -> jvapp::JvStatus {
+    let db = app.path().app_data_dir().ok().and_then(|d| jvapp::db_path(&d));
+    jvapp::status(db.as_deref())
 }
 
 #[tauri::command]
@@ -79,7 +131,9 @@ fn recalculate_prediction(
         .map(|p| p.entry)
         .collect();
 
-    let mut updated = predictor::run_prediction(
+    // JRA-VAN モデルの勝率は重みで変わらないので、そのまま使い続ける
+    let jv: Option<std::collections::HashMap<u32, f64>> = current_result.jv_probs.as_ref().map(|v| v.iter().cloned().collect());
+    let mut updated = predictor::run_prediction_with(
         current_result.race_info,
         entries,
         current_result.official_payouts,
@@ -88,6 +142,7 @@ fn recalculate_prediction(
         strategy,
         memo.unwrap_or(current_result.memo),
         current_result.combo_odds,
+        jv.as_ref(),
     );
     updated.pre_race = pre_race;
     Ok(updated)
@@ -166,6 +221,8 @@ pub fn run() {
             delete_prediction_record,
             get_roi_dashboard,
             verify_saved_race_result,
+            jv_status,
+            jv_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

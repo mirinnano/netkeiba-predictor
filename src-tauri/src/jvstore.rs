@@ -60,7 +60,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct IngestReport {
     pub file: String,
     pub from: u64,
@@ -426,4 +426,46 @@ pub fn load_works(conn: &Connection) -> rusqlite::Result<std::collections::HashM
         m.entry(w.horse_id.clone()).or_default().push(w);
     }
     Ok(m)
+}
+
+/// アプリ用: 調教の基準を作る 2021年分と、`recent_from`（yyyymmdd）以降だけを読む（全期間を持つと重いため）
+pub fn load_works_for(conn: &Connection, recent_from: u32) -> rusqlite::Result<std::collections::HashMap<String, Vec<JvWork>>> {
+    let mut stmt = conn.prepare(
+        "SELECT horse_id, slope, center, course, date, time, t4, last1, lap2 FROM works
+         WHERE date < 20220101 OR date >= ?1 ORDER BY horse_id, date, time",
+    )?;
+    let mut m: std::collections::HashMap<String, Vec<JvWork>> = std::collections::HashMap::new();
+    let rows = stmt.query_map(params![recent_from as i64], |r| {
+        Ok(JvWork {
+            horse_id: r.get(0)?,
+            slope: r.get::<_, i64>(1)? != 0,
+            center: r.get::<_, i64>(2)? as u8,
+            course: r.get::<_, i64>(3)? as u8,
+            date: r.get::<_, i64>(4)? as u32,
+            time: r.get::<_, i64>(5)? as u32,
+            t4: r.get(6)?,
+            last1: r.get(7)?,
+            lap2: r.get(8)?,
+        })
+    })?;
+    for w in rows {
+        let w = w?;
+        m.entry(w.horse_id.clone()).or_default().push(w);
+    }
+    Ok(m)
+}
+
+/// netkeiba 形式の race_id（12桁）のレースを、データ区分を問わず読む（出走馬名表・出馬表の段階でもよい）
+pub fn race_by_id(conn: &Connection, race_id: &str) -> rusqlite::Result<Option<JvRace>> {
+    let date: Option<String> = conn
+        .query_row("SELECT date FROM races WHERE race_id = ?1", params![race_id], |r| r.get(0))
+        .optional()?;
+    let Some(d) = date else { return Ok(None) };
+    let next = (d.parse::<u32>().unwrap_or(0) + 1).to_string();
+    Ok(load_races(conn, &d, &next)?.into_iter().find(|r| r.race_id == race_id))
+}
+
+/// 最新のレース日（確定成績）
+pub fn last_result_date(conn: &Connection) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT max(date) FROM races WHERE kubun = '7'", [], |r| r.get(0))
 }

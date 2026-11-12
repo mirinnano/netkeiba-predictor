@@ -391,6 +391,7 @@ pub fn standardize(rows: &[Vec<f64>]) -> Vec<Vec<f64>> {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_prediction(
     race_info: RaceInfo,
     entries: Vec<HorseEntry>,
@@ -400,6 +401,23 @@ pub fn run_prediction(
     strategy: String,
     memo: String,
     combo_odds: ComboOdds,
+) -> RacePredictionResult {
+    run_prediction_with(race_info, entries, official_payouts, weights, budget, strategy, memo, combo_odds, None)
+}
+
+/// `jv_probs`（馬番 → 勝率）を渡すと、勝率と順位・印をそれに置き換える（JRA-VAN モデル）。
+/// 5項目スコアは表示用にそのまま計算する。
+#[allow(clippy::too_many_arguments)]
+pub fn run_prediction_with(
+    race_info: RaceInfo,
+    entries: Vec<HorseEntry>,
+    official_payouts: Vec<OfficialPayoutItem>,
+    weights: ScoringWeights,
+    budget: u32,
+    strategy: String,
+    memo: String,
+    combo_odds: ComboOdds,
+    jv_probs: Option<&std::collections::HashMap<u32, f64>>,
 ) -> RacePredictionResult {
     let pace_analysis = analyze_pace(&race_info, &entries);
 
@@ -534,6 +552,11 @@ pub fn run_prediction(
                 .sum()
         })
         .collect();
+    // JRA-VAN モデルの勝率があれば、効用を log(勝率) に置き換える（順位・指数・印もそれに従う）
+    let utility: Vec<f64> = match jv_probs {
+        Some(m) => active_idx.iter().map(|&i| m.get(&preds[i].entry.umaban).copied().unwrap_or(1e-4).max(1e-6).ln()).collect(),
+        None => utility,
+    };
     for (a, &i) in active_idx.iter().enumerate() {
         preds[i].raw_score = utility[a];
     }
@@ -666,6 +689,12 @@ pub fn run_prediction(
         memo,
         saved_at: None,
         pre_race: !race_info_is_finished,
+        model_source: if jv_probs.is_some() { "jravan".into() } else { "basic".into() },
+        jv_probs: jv_probs.map(|m| {
+            let mut v: Vec<(u32, f64)> = m.iter().map(|(k, p)| (*k, *p)).collect();
+            v.sort_by_key(|x| x.0);
+            v
+        }),
         combo_odds,
     }
 }

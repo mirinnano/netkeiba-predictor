@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Loader2, Search, X } from "lucide-react";
 import {
+  IngestReport,
+  JvStatus,
   KaisaiCalendarResponse,
   RacePredictionResult,
   RoiDashboardStats,
@@ -13,6 +15,7 @@ import { BetsView } from "./components/BetsView";
 import { BrowserView } from "./components/BrowserView";
 import { HistoryView } from "./components/HistoryView";
 import { PRESETS } from "./components/WeightsPanel";
+import { JvDataPanel } from "./components/JvDataPanel";
 
 type Tab = "race" | "browser" | "bets" | "history";
 
@@ -44,6 +47,7 @@ export default function App() {
   const [browserLoading, setBrowserLoading] = useState(false);
 
   const [dashboard, setDashboard] = useState<RoiDashboardStats | null>(null);
+  const [jvStatus, setJvStatus] = useState<JvStatus | null>(null);
 
   // 再計算は連続で呼ばれるので、最後に投げたものだけを反映する
   const recalcSeq = useRef(0);
@@ -56,9 +60,30 @@ export default function App() {
 
   useEffect(() => {
     refreshDashboard();
+    refreshJvStatus();
     loadCalendar(undefined, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const refreshJvStatus = async () => {
+    try {
+      setJvStatus(await invoke<JvStatus>("jv_status"));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const importJv = async (dir: string): Promise<IngestReport[] | null> => {
+    try {
+      const r = await invoke<IngestReport[]>("jv_import", { dir });
+      await refreshJvStatus();
+      showToast("JRA-VAN データを取り込みました");
+      return r;
+    } catch (e) {
+      setError(String(e));
+      return null;
+    }
+  };
 
   const refreshDashboard = async () => {
     try {
@@ -335,6 +360,11 @@ export default function App() {
             onPickRace={(id) => analyze(id)}
             onBadDate={() => setError("開催日は YYYYMMDD の8桁で入力してください（例: 20261115）")}
           />
+        )}
+        {tab === "history" && (
+          <div className="mb-5">
+            <JvDataPanel status={jvStatus} onImport={importJv} />
+          </div>
         )}
         {tab === "history" && dashboard && (
           <HistoryView
