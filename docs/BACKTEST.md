@@ -23,6 +23,23 @@
 netkeiba への負荷について：5並列で race.netkeiba.com から一時的にブロックされた（2026-11-12）。
 並列は 1〜3 に留め、各ワーカー 1.5〜2 秒間隔、失敗が続いたら止める。
 
+## JRA-VAN データの保管と更新（SQLite）
+
+```
+Windows: update_all.bat（差分だけ取得）
+   ↓ out フォルダを Mac の backtest/jvdata/out へ上書きコピー
+Mac:     cargo run --release --example jv_ingest -- backtest/keiba.db backtest/jvdata/out
+   ↓
+Mac:     cargo run --release --example jv_model -- backtest/keiba.db
+```
+
+- 元データは JvDump の出力（追記だけのテキスト）。`keiba.db` はそこから作る解析用の写しで、壊れても約13秒で作り直せる。
+- 取り込みはファイルごとに前回読んだバイト位置を覚え、追記分だけを読む。同じレース・同じ馬はキーで1件にまとめ、
+  より確定に近いデータ区分だけが上書きする。データ区分 0（提供側の取り消し）は DB からも消す。
+- 確認済み（2026-11-13）: 2段階で取り込んだ結果と一括で取り込んだ結果は races・runners とも全行一致。
+  追記なしで再実行すると何も変わらない。DB から読んだ `jv_model` の結果はファイルから読んだときと同じ。
+- 中止・地方・海外のレースは races に入らない（その出走 439 件は runners にだけ残るが、読み出しは races と結合するので使われない）。
+
 ## 開発用と最終判定用の分け方
 
 - **開発用**：2021〜2025年のレース。特徴量・正則化・閾値の選び直しはここでだけ行う。

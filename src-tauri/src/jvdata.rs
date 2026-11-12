@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::BufRead;
 
 /// 1 始まりの位置 `pos` から `len` バイトを取り出して Shift_JIS として読む（前後の空白は除く）
-fn field(rec: &[u8], pos: usize, len: usize) -> String {
+pub(crate) fn field(rec: &[u8], pos: usize, len: usize) -> String {
     let s = pos - 1;
     let e = (s + len).min(rec.len());
     if s >= e {
@@ -28,7 +28,7 @@ fn tenth(rec: &[u8], pos: usize, len: usize) -> Option<f64> {
 }
 
 /// データ区分の確定度。大きいほど確定に近い。0（削除）・9（中止）・A（地方）・B（海外）は使わない
-fn kubun_rank(k: u8) -> Option<u8> {
+pub(crate) fn kubun_rank(k: u8) -> Option<u8> {
     match k {
         b'7' => Some(7),
         b'6' => Some(6),
@@ -113,7 +113,7 @@ pub struct JvRunner {
     pub style: u32,
 }
 
-fn race_key(rec: &[u8]) -> String {
+pub(crate) fn race_key(rec: &[u8]) -> String {
     // 開催年(12,4) 月日(16,4) 場(20,2) 回(22,2) 日(24,2) R(26,2)
     field(rec, 12, 16)
 }
@@ -281,4 +281,56 @@ pub fn load_races(race_dir: &std::path::Path) -> std::io::Result<Vec<JvRace>> {
     }
     out.sort_by(|a, b| (&a.date, &a.race_id).cmp(&(&b.date, &b.race_id)));
     Ok(out)
+}
+
+
+/// 調教1本（坂路 HC・ウッドチップ WC）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JvWork {
+    pub horse_id: String,
+    pub slope: bool,
+    /// 0:美浦 1:栗東
+    pub center: u8,
+    /// ウッドのコース（0:A〜4:E）。坂路は 0
+    pub course: u8,
+    pub date: u32,
+    pub time: u32,
+    pub t4: Option<f64>,
+    pub last1: Option<f64>,
+    /// ラスト1F の1つ前のラップ（400M〜200M）
+    pub lap2: Option<f64>,
+}
+
+/// 測定不良（0）や上限（999.9・99.9）は None
+fn work_time(rec: &[u8], pos: usize, len: usize) -> Option<f64> {
+    let s = field(rec, pos, len);
+    if s.chars().all(|c| c == '9') {
+        return None;
+    }
+    s.parse::<f64>().ok().filter(|v| *v > 0.0).map(|v| v / 10.0)
+}
+
+/// HC（坂路）: 4F合計 35(4) / 400-200M 53(3) / 200-0M 56(3)
+/// WC（ウッド）: コース 35(1) / 4F合計 80(4) / 400-200M 98(3) / 200-0M 101(3)
+pub fn parse_work(rec: &[u8]) -> Option<JvWork> {
+    let slope = match rec.get(0..2) {
+        Some(b"HC") => true,
+        Some(b"WC") => false,
+        _ => return None,
+    };
+    if rec.len() < if slope { 58 } else { 103 } {
+        return None;
+    }
+    let date: u32 = field(rec, 13, 8).parse().ok()?;
+    Some(JvWork {
+        horse_id: field(rec, 25, 10),
+        slope,
+        center: rec[11].wrapping_sub(b'0'),
+        course: if slope { 0 } else { rec[34].wrapping_sub(b'0') },
+        date,
+        time: field(rec, 21, 4).parse().unwrap_or(0),
+        t4: if slope { work_time(rec, 35, 4) } else { work_time(rec, 80, 4) },
+        last1: if slope { work_time(rec, 56, 3) } else { work_time(rec, 101, 3) },
+        lap2: if slope { work_time(rec, 53, 3) } else { work_time(rec, 98, 3) },
+    })
 }

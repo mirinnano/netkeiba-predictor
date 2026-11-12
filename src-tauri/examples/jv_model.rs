@@ -113,6 +113,27 @@ fn load_works(out_dir: &std::path::Path) -> HashMap<String, Vec<Work>> {
             m.entry(horse).or_default().push(w);
         }
     }
+    finish_works(&mut m);
+    m
+}
+
+/// SQLite（jv_ingest で作った DB）から調教を読む
+fn load_works_db(conn: &rusqlite::Connection) -> HashMap<String, Vec<Work>> {
+    let mut m: HashMap<String, Vec<Work>> = HashMap::new();
+    for (horse, v) in netkeiba_predictor_lib::jvstore::load_works(conn).expect("調教を読めません") {
+        m.insert(
+            horse,
+            v.into_iter()
+                .map(|w| Work { date: w.date, slope: w.slope, center: w.center, course: w.course, t4: w.t4, last1: w.last1, lap2: w.lap2, time: w.time, partners: 0 })
+                .collect(),
+        );
+    }
+    finish_works(&mut m);
+    m
+}
+
+/// 併せ馬の目安を数え、日付・時刻順に並べる
+fn finish_works(m: &mut HashMap<String, Vec<Work>>) {
     // 併せ馬の目安: 同じ (種類, トレセン, コース, 日, 時刻) に何頭いたか
     let mut slots: HashMap<(bool, u8, u8, u32, u32), u32> = HashMap::new();
     for v in m.values() {
@@ -126,7 +147,6 @@ fn load_works(out_dir: &std::path::Path) -> HashMap<String, Vec<Work>> {
         }
         v.sort_by_key(|w| (w.date, w.time));
     }
-    m
 }
 
 fn work_key(w: &Work) -> (bool, u8, u8) {
@@ -194,9 +214,13 @@ fn standardize(col: &mut [f64]) {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("jv_races.jsonl を指定してください");
-    let out_dir = std::path::PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "../backtest/jvdata/out".into()));
-    let works = load_works(&out_dir);
+    // 引数が .db なら SQLite（jv_ingest で作ったもの）から、そうでなければ jv_races.jsonl と JvDump の出力から読む
+    let path = std::env::args().nth(1).expect("keiba.db か jv_races.jsonl を指定してください");
+    let db = if path.ends_with(".db") { Some(netkeiba_predictor_lib::jvstore::open(std::path::Path::new(&path)).expect("DB を開けません")) } else { None };
+    let works = match &db {
+        Some(c) => load_works_db(c),
+        None => load_works(&std::path::PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| "../backtest/jvdata/out".into()))),
+    };
     // 調教タイムの基準: 2021年の、坂路/ウッド × トレセン × コースごとの中央値
     let mut wv: HashMap<(bool, u8, u8), (Vec<f64>, Vec<f64>)> = HashMap::new();
     for v in works.values() {
@@ -212,12 +236,17 @@ fn main() {
         .map(|(k, (mut a, mut b))| (k, (median(&mut a), median(&mut b))))
         .collect();
     println!("調教: {} 頭分 / 基準 {} 種類", works.len(), work_std.len());
-    let mut races: Vec<JvRace> = std::io::BufReader::new(std::fs::File::open(&path).unwrap())
-        .lines()
-        .map_while(Result::ok)
-        .filter_map(|l| serde_json::from_str::<JvRace>(&l).ok())
-        .filter(|r| r.date.as_str() >= "20210101" && r.date.as_str() < "20260101" && r.kubun == '7')
-        .collect();
+    // 2026年は最終判定用なので読まない
+    let mut races: Vec<JvRace> = match &db {
+        Some(c) => netkeiba_predictor_lib::jvstore::load_races(c, "20210101", "20260101").expect("レースを読めません"),
+        None => std::io::BufReader::new(std::fs::File::open(&path).unwrap())
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|l| serde_json::from_str::<JvRace>(&l).ok())
+            .filter(|r| r.date.as_str() >= "20210101" && r.date.as_str() < "20260101")
+            .collect(),
+    };
+    races.retain(|r| r.kubun == '7');
     races.sort_by(|a, b| (&a.date, &a.race_id).cmp(&(&b.date, &b.race_id)));
 
     // 基準タイム（会場・トラック・距離ごとの完走馬タイムの中央値）と馬場補正、ペースの基準は 2021年だけで作る
