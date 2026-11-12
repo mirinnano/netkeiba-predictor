@@ -311,6 +311,75 @@ fn fit_cols(train: &[Vec<Runner>], cols: &dyn Fn(&Runner) -> Vec<f64>, l2: f64) 
     beta
 }
 
+/// 1〜3着の順序（Plackett-Luce, 順位付きロジット）で当てはめる。1着だけより使える情報が約3倍になる
+fn fit_cols_pl(train: &[Vec<Runner>], cols: &dyn Fn(&Runner) -> Vec<f64>, l2: f64, stages: u32) -> Vec<f64> {
+    let k = cols(&train[0][0]).len();
+    let mut beta = vec![0.0; k];
+    beta[0] = 1.0;
+    let xs: Vec<Vec<Vec<f64>>> = train.iter().map(|r| r.iter().map(cols).collect()).collect();
+    let mut nterms = 0.0;
+    for race in train {
+        for st in 1..=stages {
+            if race.iter().any(|r| r.rank == st) {
+                nterms += 1.0;
+            }
+        }
+    }
+    for _ in 0..3000 {
+        let mut g = vec![0.0; k];
+        for (race, x) in train.iter().zip(&xs) {
+            let u: Vec<f64> = x.iter().map(|xi| xi.iter().zip(&beta).map(|(a, b)| a * b).sum()).collect();
+            let mut alive: Vec<bool> = vec![true; race.len()];
+            for st in 1..=stages {
+                let Some(w) = race.iter().position(|r| r.rank == st) else { break };
+                let idx: Vec<usize> = (0..race.len()).filter(|&i| alive[i]).collect();
+                let p = softmax(&idx.iter().map(|&i| u[i]).collect::<Vec<_>>());
+                for j in 0..k {
+                    let ex: f64 = idx.iter().zip(&p).map(|(&i, pi)| pi * x[i][j]).sum();
+                    g[j] += x[w][j] - ex;
+                }
+                alive[w] = false;
+            }
+        }
+        for j in 0..k {
+            let reg = if j == 0 { 0.0 } else { l2 * beta[j] };
+            beta[j] += 0.3 * (g[j] / nterms - reg);
+        }
+    }
+    beta
+}
+
+/// レースごとの1着の対数損失
+fn race_losses(races: &[Vec<Runner>], prob: impl Fn(&[Runner]) -> Vec<f64>) -> Vec<f64> {
+    races
+        .iter()
+        .map(|r| {
+            let p = prob(r);
+            let w = r.iter().position(|x| x.rank == 1).unwrap();
+            -p[w].max(1e-9).ln()
+        })
+        .collect()
+}
+
+/// 対応のある差（a − b）の平均と、レース単位のブートストラップ95%区間
+fn paired_ci(a: &[f64], b: &[f64]) -> (f64, f64, f64) {
+    let d: Vec<f64> = a.iter().zip(b).map(|(x, y)| x - y).collect();
+    let n = d.len();
+    let mean = d.iter().sum::<f64>() / n as f64;
+    let mut seed: u64 = 0x9E3779B97F4A7C15;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut ms: Vec<f64> = (0..2000)
+        .map(|_| (0..n).map(|_| d[(next() % n as u64) as usize]).sum::<f64>() / n as f64)
+        .collect();
+    ms.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    (mean, ms[50], ms[1949])
+}
+
 fn model_prob<'a>(beta: &'a [f64], mask: &'a [usize]) -> impl Fn(&[Runner]) -> Vec<f64> + 'a {
     move |r: &[Runner]| softmax(&r.iter().map(|x| util(x, beta, mask)).collect::<Vec<_>>())
 }
@@ -443,6 +512,7 @@ fn main() {
     println!("   最良プールa");
     let mut sums = vec![0.0; masks.len() + 1];
     let mut resid_lines: Vec<String> = Vec::new();
+    let mut pooled: Vec<Vec<f64>> = vec![Vec::new(); 6];
     const THRESH: [f64; 5] = [0.7, 0.8, 0.85, 0.9, 0.95];
     let mut roi_all = (0.0f64, 0.0f64);
     let mut roi_m = [(0.0f64, 0.0f64); 5];
@@ -531,6 +601,20 @@ fn main() {
         }
         resid_lines.push(format!("  {}〜{}", test_r[0].race_info.date_str, line));
 
+        // 対応のある比較用に、レースごとの損失を区間をまたいで貯める
+        let lin = |b: Vec<f64>, cols: &dyn Fn(&Runner) -> Vec<f64>| -> Vec<f64> {
+            race_losses(&te, |r: &[Runner]| softmax(&r.iter().map(|x| cols(x).iter().zip(&b).map(|(a, c)| a * c).sum()).collect::<Vec<_>>()))
+        };
+        let c_g = variants[1].1.as_ref();
+        let c_m = variants[2].1.as_ref();
+        pooled[0].extend(race_losses(&te, |r: &[Runner]| r.iter().map(|x| x.market).collect()));
+        pooled[1].extend(lin(fit_cols(&tr, c_g, l2 * 0.25), c_g));
+        pooled[2].extend(lin(fit_cols(&tr, c_m, l2 * 0.25), c_m));
+        pooled[3].extend(lin(fit_cols_pl(&tr, c_g, l2 * 0.25, 3), c_g));
+        pooled[4].extend(lin(fit_cols_pl(&tr, c_m, l2 * 0.25, 3), c_m));
+        let c_f = variants[5].1.as_ref();
+        pooled[5].extend(lin(fit_cols_pl(&tr, c_f, l2, 3), c_f));
+
         // 回収率: 市場+モデル（学習側で当てはめ）で p×オッズ が閾値以上の馬の単勝を100円ずつ
         let cols = &variants[5].1;
         let bm = fit_cols(&tr, cols.as_ref(), l2 * 0.25);
@@ -579,6 +663,14 @@ fn main() {
         print!("{:>14.4}", v / cnt);
     }
     println!();
+    println!("\n[対応のある比較: 検証全区間をまとめた1着の対数損失の差（負なら左が良い）, 95%区間はレース単位ブートストラップ]");
+    let names = ["市場", "市場(γ補正)", "+モデル(1着で学習)", "市場(γ補正, 1-3着で学習)", "+モデル(1-3着で学習)", "+特徴量個別(1-3着で学習)"];
+    for (a, b) in [(2, 1), (4, 3), (4, 2), (3, 1), (5, 3), (1, 0)] {
+        let (m, lo, hi) = paired_ci(&pooled[a], &pooled[b]);
+        println!("  {} − {}: {:+.4}  [{:+.4}, {:+.4}]{}", names[a], names[b], m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
+    }
+    println!("  （各 {} レース）", pooled[0].len());
+
     println!("\n[単勝の回収率（検証区間のみ, 確定オッズで近似）]");
     println!("  全馬を買う: {:.1}%（{} 点）", roi_all.1 / roi_all.0 * 100.0, (roi_all.0 / 100.0) as u64);
     for (ti, t) in THRESH.iter().enumerate() {
