@@ -1,4 +1,5 @@
 pub mod db;
+pub mod jvdata;
 pub mod models;
 pub mod predictor;
 pub mod scraper;
