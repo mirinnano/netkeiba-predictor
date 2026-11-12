@@ -658,3 +658,166 @@ fn main() {
     let gd = fit_cols(&all, &comb, l2 * 0.25);
     println!("  MARKET_GAMMA = {:.3}, MODEL_DELTA = {:.3}", gd[0], gd[1]);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use netkeiba_predictor_lib::models::PastRun;
+
+    fn info(id: &str, date: &str) -> RaceInfo {
+        RaceInfo {
+            race_id: id.into(),
+            race_name: "テスト".into(),
+            race_num: "1R".into(),
+            date_str: date.into(),
+            venue: "東京".into(),
+            grade: None,
+            start_time: "10:00".into(),
+            surface: "芝".into(),
+            distance: 1600,
+            direction: "左".into(),
+            weather: "晴".into(),
+            track_cond: "良".into(),
+            head_count: 6,
+            is_finished: true,
+            source_url: String::new(),
+        }
+    }
+
+    fn entry(u: u32, rank: Option<u32>, odds: Option<f64>) -> HorseEntry {
+        HorseEntry {
+            waku: u.min(8),
+            umaban: u,
+            horse_id: format!("h{}", u),
+            horse_name: format!("馬{}", u),
+            sex_age: "牡4".into(),
+            carried_weight: 57.0,
+            jockey_name: String::new(),
+            jockey_id: String::new(),
+            trainer_name: String::new(),
+            sire: String::new(),
+            dam: String::new(),
+            broodmare_sire: String::new(),
+            running_style: if u % 2 == 0 { "先".into() } else { "差".into() },
+            interval_text: String::new(),
+            body_weight: None,
+            weight_diff: None,
+            win_odds: odds,
+            place_odds_min: None,
+            place_odds_max: None,
+            popularity: None,
+            is_scratched: false,
+            past_runs: vec![PastRun {
+                date: "2023.01.01".into(),
+                venue: "東京".into(),
+                race_name: "前走".into(),
+                grade: None,
+                finish_rank: Some(u),
+                surface: "芝".into(),
+                distance: 1600,
+                time_str: String::new(),
+                time_sec: None,
+                track_cond: "良".into(),
+                head_count: Some(10),
+                horse_num: None,
+                popularity: None,
+                jockey: String::new(),
+                carried_weight: None,
+                passage: String::new(),
+                last_3f: None,
+                margin: None,
+            }],
+            actual_rank: rank,
+            actual_time: None,
+            actual_last_3f: None,
+        }
+    }
+
+    fn race(id: &str, entries: Vec<HorseEntry>) -> Race {
+        Race { race_info: info(id, "2024年1月14日"), entries, payouts: vec![], combo_odds: ComboOdds::default() }
+    }
+
+    fn std0() -> StdTimes {
+        StdTimes::fit(std::iter::empty())
+    }
+
+    #[test]
+    fn non_finishers_count_as_losers_and_stay_in_the_market() {
+        // 1番人気（オッズ 1.5）が競走中止で着順なし
+        let r = race(
+            "202405010101",
+            vec![
+                entry(1, None, Some(1.5)),
+                entry(2, Some(1), Some(5.0)),
+                entry(3, Some(2), Some(8.0)),
+                entry(4, Some(3), Some(12.0)),
+                entry(5, Some(4), Some(20.0)),
+            ],
+        );
+        let rs = runners(&r, &std0(), (0.0, 0.0)).expect("評価に使えるレース");
+        assert_eq!(rs.len(), 5, "中止の馬も残す");
+        let fav = &rs[0];
+        assert_eq!(fav.rank, 99);
+        // 市場確率は全出走馬で正規化する（中止の馬を除くと他の馬の確率がふくらむ）
+        let inv: f64 = [1.5, 5.0, 8.0, 12.0, 20.0].iter().map(|o| 1.0 / o).sum();
+        assert!((fav.market - (1.0 / 1.5) / inv).abs() < 1e-9);
+        assert!((rs.iter().map(|x| x.market).sum::<f64>() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn races_with_a_runner_missing_odds_are_skipped() {
+        let r = race(
+            "202405010102",
+            vec![
+                entry(1, Some(2), None),
+                entry(2, Some(1), Some(5.0)),
+                entry(3, Some(3), Some(8.0)),
+                entry(4, Some(4), Some(12.0)),
+                entry(5, Some(5), Some(20.0)),
+            ],
+        );
+        assert!(runners(&r, &std0(), (0.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn day_bias_uses_only_earlier_races_of_the_same_day() {
+        let mut first = race(
+            "202405010101",
+            (1..=6).map(|u| entry(u, Some(u), Some(u as f64 * 3.0))).collect(),
+        );
+        first.race_info.surface = "芝".into();
+        let second = race(
+            "202405010102",
+            (1..=6).map(|u| entry(u, Some(7 - u), Some(u as f64 * 3.0))).collect(),
+        );
+        let b = day_bias(&[second, first]);
+        assert_eq!(b["202405010101"], (0.0, 0.0), "その日の最初のレースには偏りの情報がない");
+        let (inner, _) = b["202405010102"];
+        assert!(inner < 0.0, "1R は内枠が上位だったので、2R には内有利が入る");
+    }
+
+    #[test]
+    fn pace_features_ignore_runs_on_or_after_the_race_date() {
+        let run = |date: &str, rank: u32| HorseRun {
+            date: date.into(),
+            head_count: Some(10),
+            finish_rank: Some(rank),
+            passage: "5-5".into(),
+            last3f: Some(34.0),
+            race_last3f: Some(35.0),
+            last3f_rank: Some(1),
+            ..Default::default()
+        };
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            "x".to_string(),
+            vec![run("2024/02/01", 1), run("2024/01/14", 1), run("2023/12/01", 10)],
+        );
+        HORSES.set(m).ok();
+        // 2024/01/14 のレースから見ると、使えるのは 2023/12/01 の1走だけ
+        let f = pace_features("x", 20240114).expect("過去走がある");
+        let only_past = pace_features("x", 20231202).unwrap();
+        assert_eq!(f, only_past);
+        assert!(pace_features("x", 20231201).is_none(), "当日の走は使わない");
+    }
+}

@@ -585,7 +585,7 @@ fn parse_past_run(td: ElementRef) -> Option<PastRun> {
     })
 }
 
-async fn fetch_jra_odds(
+pub async fn fetch_jra_odds(
     client: &reqwest::Client,
     race_id: &str,
 ) -> HashMap<u32, (Option<f64>, Option<f64>, Option<f64>, Option<u32>)> {
@@ -881,7 +881,7 @@ pub async fn fetch_race_result(
 }
 
 /// JRA の組み合わせ馬券オッズ（馬連=4, ワイド=5, 3連複=7）。取れなかった券種は空のまま。
-async fn fetch_jra_combo_odds(client: &reqwest::Client, race_id: &str) -> ComboOdds {
+pub async fn fetch_jra_combo_odds(client: &reqwest::Client, race_id: &str) -> ComboOdds {
     let mut combo = ComboOdds::default();
     for (type_id, pair_len) in [("4", 2_usize), ("5", 2), ("7", 3)] {
         let url = format!(
