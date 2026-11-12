@@ -7,6 +7,8 @@
 //   JvDump setup                                   利用キーなどの設定画面を開く
 //   JvDump open <データ種別> <開始日時> <オプション> <出力先>
 //       例: JvDump open RACE 20210101000000 4 out
+//   JvDump update <データ種別> <出力先>             前回の続きから差分だけ取る（通常データ）
+//       例: JvDump update RACE out
 //   JvDump rt <データ種別> <キー> <出力先>          速報系（時系列オッズなど）を1件取る
 //       例: JvDump rt 0B41 2024111505050811 out
 using System;
@@ -58,6 +60,20 @@ internal static class JvDump
         {
             return OpenAndDump(jv, args[1], args[2], int.Parse(args[3]), args[4]);
         }
+        if (mode == "update" && args.Length == 3)
+        {
+            string stampFile = Path.Combine(Path.Combine(args[2], args[1]), "lastfiletimestamp.txt");
+            if (!File.Exists(stampFile))
+            {
+                Console.Error.WriteLine("前回の取得記録がありません: " + stampFile);
+                Console.Error.WriteLine("先に open（セットアップ）で最初の取得をしてください。");
+                return 1;
+            }
+            string fromStamp = File.ReadAllText(stampFile).Trim();
+            Console.WriteLine(args[1] + ": " + fromStamp + " 以降の差分を取ります");
+            // オプション 1 = 通常データ（差分）
+            return OpenAndDump(jv, args[1], fromStamp, 1, args[2]);
+        }
         if (mode == "rt" && args.Length == 4)
         {
             return RtDump(jv, args[1], args[2], args[3]);
@@ -71,6 +87,7 @@ internal static class JvDump
         Console.Error.WriteLine("使い方:");
         Console.Error.WriteLine("  JvDump setup");
         Console.Error.WriteLine("  JvDump open <データ種別> <開始日時 yyyyMMddHHmmss> <オプション> <出力先>");
+        Console.Error.WriteLine("  JvDump update <データ種別> <出力先>");
         Console.Error.WriteLine("  JvDump rt <データ種別> <キー> <出力先>");
     }
 
@@ -83,8 +100,16 @@ internal static class JvDump
         int rc = jv.JVOpen(dataspec, fromtime, option, ref readCount, ref downloadCount, ref lastTimestamp);
         Console.WriteLine("JVOpen=" + rc + " 読み込みファイル数=" + readCount + " ダウンロード数=" + downloadCount
             + " 最終ファイル時刻=" + lastTimestamp);
+        if (rc == -1)
+        {
+            // 該当データなし（新しいデータがまだない）。時刻は進めない
+            Console.WriteLine("新しいデータはありません");
+            AppendLog(outRoot, dataspec, fromtime, option, 0, "no data");
+            return 0;
+        }
         if (rc < 0)
         {
+            AppendLog(outRoot, dataspec, fromtime, option, 0, "JVOpen=" + rc);
             return 1;
         }
 
@@ -168,9 +193,22 @@ internal static class JvDump
         }
         Console.WriteLine();
         Console.WriteLine("レコード数 " + records);
-        // 次回はこの時刻から差分だけ取れる
-        File.WriteAllText(Path.Combine(dir, "lastfiletimestamp.txt"), lastTimestamp);
+        // 最後まで読めたときだけ時刻を進める。途中で止まったのに進めると、その分を二度と取れなくなる
+        if (exitCode == 0 && lastTimestamp.Length > 0)
+        {
+            File.WriteAllText(Path.Combine(dir, "lastfiletimestamp.txt"), lastTimestamp);
+        }
+        AppendLog(outRoot, dataspec, fromtime, option, records, exitCode == 0 ? "ok -> " + lastTimestamp : "read error");
         return exitCode;
+    }
+
+    /// いつ・何を・何件取ったかを out\update_log.txt に残す
+    private static void AppendLog(string outRoot, string dataspec, string fromtime, int option, long records, string result)
+    {
+        Directory.CreateDirectory(outRoot);
+        string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "\t" + dataspec + "\tfrom=" + fromtime
+            + "\toption=" + option + "\trecords=" + records + "\t" + result + "\r\n";
+        File.AppendAllText(Path.Combine(outRoot, "update_log.txt"), line);
     }
 
     private static bool reportedPadding = false;
