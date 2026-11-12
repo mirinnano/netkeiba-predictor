@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-12T20:16:47.418364+09:00",
+  "title": "Design System: KeibaScope",
+  "extensions": {
+    "colorMeta": {
+      "shell": {
+        "role": "primary",
+        "displayName": "Silks Blue"
+      },
+      "ground": {
+        "role": "neutral",
+        "displayName": "Daylight Ground"
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink"
+      },
+      "mark": {
+        "role": "accent",
+        "displayName": "Mark Red",
+        "purpose": "印と削除だけ"
+      },
+      "mine": {
+        "role": "accent",
+        "displayName": "My Tickets Violet",
+        "purpose": "推奨買い目に入っている馬だけ"
+      },
+      "waku-1": {
+        "role": "data",
+        "displayName": "枠1 白"
+      },
+      "waku-2": {
+        "role": "data",
+        "displayName": "枠2 黒"
+      },
+      "waku-3": {
+        "role": "data",
+        "displayName": "枠3 赤"
+      },
+      "waku-4": {
+        "role": "data",
+        "displayName": "枠4 青"
+      },
+      "waku-5": {
+        "role": "data",
+        "displayName": "枠5 黄"
+      },
+      "waku-6": {
+        "role": "data",
+        "displayName": "枠6 緑"
+      },
+      "waku-7": {
+        "role": "data",
+        "displayName": "枠7 橙"
+      },
+      "waku-8": {
+        "role": "data",
+        "displayName": "枠8 桃"
+      }
+    },
+    "typographyMeta": {
+      "race-title": {
+        "displayName": "Race title",
+        "purpose": "レース名と◎の馬名"
+      },
+      "figure-lg": {
+        "displayName": "Large figure",
+        "purpose": "◎の数値と合計金額"
+      },
+      "figure": {
+        "displayName": "Figure",
+        "purpose": "表の数字"
+      }
+    },
+    "shadows": [
+      {
+        "name": "cloth-selected",
+        "value": "0 1px 3px rgba(22,24,29,0.18)",
+        "purpose": "選択中のゼッケン"
+      },
+      {
+        "name": "toast",
+        "value": "0 6px 20px rgba(22,24,29,0.25)",
+        "purpose": "トースト"
+      }
+    ],
+    "motion": [
+      {
+        "name": "strip-reorder",
+        "value": "420ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "ゼッケン列の並び替え（FLIP）"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact",
+        "value": "1280px"
+      },
+      {
+        "name": "min-window",
+        "value": "1024px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Saddle cloth",
+      "kind": "custom",
+      "refersTo": "cloth",
+      "description": "枠色の布に馬番。馬の顔。",
+      "html": "<span class=\"ds-cloth w5\">10</span> <span class=\"ds-cloth w1\">1</span> <span class=\"ds-cloth w8\">17</span>",
+      "css": ".ds-cloth{display:inline-flex;align-items:center;justify-content:center;width:54px;height:48px;border:1px solid #16181D;border-radius:4px;font:700 28px 'Barlow Condensed','Arial Narrow',sans-serif}.w1{background:#fff;color:#16181D}.w5{background:#F2C200;color:#16181D}.w8{background:#F06FA4;color:#fff}"
+    },
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "保存などの主要操作。",
+      "html": "<button class=\"ds-btn\">この予想を保存</button>",
+      "css": ".ds-btn{background:#1D3FA8;color:#fff;border:0;border-radius:6px;padding:8px 16px;font:700 13px 'Yu Gothic UI','Hiragino Sans',sans-serif}.ds-btn:hover{background:#15308A}"
+    },
+    {
+      "name": "Segmented",
+      "kind": "chip",
+      "refersTo": "segmented-on",
+      "description": "配分の方針・予算。",
+      "html": "<div class=\"ds-seg\"><button class=\"on\">バランス</button><button>的中率重視</button><button>期待値重視</button></div>",
+      "css": ".ds-seg{display:flex;border:1px solid #D9D6CC;border-radius:6px;padding:2px;background:#fff}.ds-seg button{flex:1;border:0;background:none;padding:6px 10px;font:700 12px 'Yu Gothic UI',sans-serif;color:#5A5F6B;border-radius:4px}.ds-seg .on{background:#16181D;color:#fff}"
+    },
+    {
+      "name": "Shell tabs",
+      "kind": "nav",
+      "refersTo": "tab-on",
+      "description": "ヘッダー帯の画面切り替え。",
+      "html": "<nav class=\"ds-nav\"><a class=\"on\">出馬表</a><a>開催一覧</a><a>買い目</a><a>回収率</a></nav>",
+      "css": ".ds-nav{display:flex;gap:4px;background:#1D3FA8;padding:10px}.ds-nav a{padding:8px 14px;border-radius:6px;color:#C9D4F5;font:700 13px 'Yu Gothic UI',sans-serif}.ds-nav a.on{background:#fff;color:#1D3FA8}"
+    }
+  ],
+  "narrative": {
+    "northStar": "枠帽と勝負服",
+    "overview": "出走馬はコースで見るときと同じ色で読む。枠帽の8色に馬番を載せたゼッケンが各馬の顔で、予想順はゼッケンの列になる。それ以外は昼の明るい地と墨の文字だけで組む。",
+    "keyCharacteristics": [
+      "ゼッケン列が見せ場",
+      "数字は縦長の Barlow Condensed",
+      "色は意味のある場所だけ"
+    ],
+    "rules": [
+      {
+        "name": "枠色はゼッケン専用",
+        "body": "8つの枠色は馬番の布にだけ使う。",
+        "section": "colors"
+      },
+      {
+        "name": "赤インクは印だけ",
+        "body": "#C0392B は印と削除に限る。",
+        "section": "colors"
+      },
+      {
+        "name": "紫は自分の買い目だけ",
+        "body": "#7A2BD9 は推奨買い目の馬の目印に限る。",
+        "section": "colors"
+      },
+      {
+        "name": "階層は大きさの差で作る",
+        "body": "囲み枠や色面で強調しない。",
+        "section": "typography"
+      }
+    ],
+    "dos": [
+      "印と枠色は競馬の慣用どおりに",
+      "確定後の予想には集計外の表示を出す",
+      "推定オッズは破線枠で区別する"
+    ],
+    "donts": [
+      "枠色・赤・紫を装飾に使わない",
+      "カードを入れ子にしない",
+      "グラデーションやキッカーを使わない"
+    ]
+  }
+}

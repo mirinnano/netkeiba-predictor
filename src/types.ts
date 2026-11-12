@@ -128,6 +128,8 @@ export interface BetRecommendation {
   is_hit: boolean | null;
   actual_payout_per_100: number | null;
   actual_return: number | null;
+  /** true のとき est_odds は実オッズではなく推定値 */
+  odds_is_estimated: boolean;
 }
 
 export interface RaceInfo {
@@ -169,6 +171,8 @@ export interface RacePredictionResult {
   roi_percent: number | null;
   memo: string;
   saved_at: string | null;
+  /** 確定前の情報だけで作った予想なら true（回収率の集計対象） */
+  pre_race: boolean;
 }
 
 export interface SavedPredictionSummary {
@@ -185,6 +189,7 @@ export interface SavedPredictionSummary {
   total_bet: number;
   total_return: number | null;
   is_verified: boolean;
+  is_pre_race: boolean;
   memo: string;
   saved_at: string;
 }
@@ -192,6 +197,7 @@ export interface SavedPredictionSummary {
 export interface RoiDashboardStats {
   total_saved_races: number;
   verified_races: number;
+  backtest_races: number;
   honmei_win_count: number;
   honmei_top3_count: number;
   ticket_hit_races: number;

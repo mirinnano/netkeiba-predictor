@@ -3,23 +3,68 @@
 @tailwind utilities;
 
 @layer base {
+  html {
+    color-scheme: light;
+  }
   body {
-    font-family: "Meiryo", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", sans-serif;
+    @apply bg-ground text-ink font-sans antialiased;
+    font-size: 13px;
+    line-height: 1.5;
+    font-variant-numeric: tabular-nums;
+  }
+  ::selection {
+    background: #1d3fa8;
+    color: #fff;
+  }
+  :where(button, a, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid #1d3fa8;
+    outline-offset: 2px;
+  }
+  input {
+    caret-color: #1d3fa8;
   }
 }
 
-/* Custom sleek scrollbar */
+@layer components {
+  /* ゼッケン: 枠色の布に太い縦長の数字 */
+  .cloth {
+    @apply inline-flex items-center justify-center rounded font-num font-bold leading-none border border-ink;
+  }
+  .num {
+    @apply font-num;
+  }
+}
+
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-track {
-  background: #0f172a;
+  background: #efede6;
 }
 ::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 4px;
+  background: #c9c5b9;
+  border-radius: 5px;
+  border: 2px solid #efede6;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569;
+  background: #a8a498;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@keyframes progress {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
 }
