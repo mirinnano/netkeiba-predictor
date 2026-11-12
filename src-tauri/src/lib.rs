@@ -1,5 +1,7 @@
 pub mod db;
+pub mod jv_coef;
 pub mod jvdata;
+pub mod jvmodel;
 pub mod jvstore;
 pub mod models;
 pub mod predictor;
