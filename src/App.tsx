@@ -9,6 +9,7 @@ import {
   RoiDashboardStats,
   ScoringWeights,
   VenueRaces,
+  BetRecommendation,
 } from "./types";
 import { RaceView } from "./components/RaceView";
 import { BetsView } from "./components/BetsView";
@@ -19,6 +20,7 @@ import { postTime, recommendedKey } from "./lib/format";
 import { JvDataPanel } from "./components/JvDataPanel";
 import { TodayView } from "./components/TodayView";
 import { WinCelebration } from "./components/WinCelebration";
+import { myTotals } from "./components/MyBets";
 
 type Tab = "today" | "race" | "browser" | "bets" | "history";
 
@@ -161,7 +163,7 @@ export default function App() {
     setBusyText("出馬表とオッズを取得中");
     setError(null);
     try {
-      const res = await invoke<RacePredictionResult>("analyze_race", { input: q, weights, budget, strategy });
+      const res = withRememberedBets(await invoke<RacePredictionResult>("analyze_race", { input: q, weights, budget, strategy }));
       setPrediction(res);
       setMemo(res.memo || "");
       setOddsAt(new Date());
@@ -222,7 +224,7 @@ export default function App() {
         if (!done) return;
         const saved = current.saved_at ? await invoke<RacePredictionResult>("save_prediction_record", { result: done }).catch(() => done) : done;
         setPrediction(saved);
-        if ((saved.total_return ?? 0) > 0) setCelebrate(saved);
+        if (myTotals(saved).ret > 0) setCelebrate(saved);
         else showToast("払戻が出ました。今回は外れです");
       } catch {
         /* 通信できないときは次の回に任せる */
@@ -261,6 +263,39 @@ export default function App() {
     } catch (e) {
       setError(String(e));
     }
+  };
+
+  // 自分の馬券は、レースごとに端末へ覚えておき、保存済みの予想にもすぐ書き戻す
+  const myBetsSeq = useRef(0);
+  const setMyBets = (bets: BetRecommendation[]) => {
+    if (!prediction) return;
+    const next = { ...prediction, my_bets: bets };
+    setPrediction(next);
+    try {
+      localStorage.setItem(`myBets:${next.race_info.race_id}`, JSON.stringify(bets));
+    } catch {
+      /* 覚えられなくても、この画面の中では使える */
+    }
+    const seq = ++myBetsSeq.current;
+    window.setTimeout(async () => {
+      if (seq !== myBetsSeq.current || bets.length === 0) return;
+      try {
+        const saved = await invoke<RacePredictionResult>("save_prediction_record", { result: { ...next, memo } });
+        setPrediction((p) => (p && p.race_info.race_id === saved.race_info.race_id ? { ...p, saved_at: saved.saved_at } : p));
+      } catch {
+        /* 保存できなくても端末には覚えている */
+      }
+    }, 800);
+  };
+  const withRememberedBets = (r: RacePredictionResult): RacePredictionResult => {
+    if (r.my_bets && r.my_bets.length > 0) return r;
+    try {
+      const raw = localStorage.getItem(`myBets:${r.race_info.race_id}`);
+      if (raw) return { ...r, my_bets: JSON.parse(raw) };
+    } catch {
+      /* noop */
+    }
+    return r;
   };
 
   const save = async () => {
@@ -448,6 +483,7 @@ export default function App() {
             busy={busy}
             memo={memo}
             onMemo={setMemo}
+            onMyBets={setMyBets}
           />
         )}
         {tab === "bets" && prediction && <BetsView result={prediction} />}

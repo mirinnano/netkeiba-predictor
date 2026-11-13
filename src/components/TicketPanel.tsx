@@ -1,5 +1,6 @@
 import { Save } from "lucide-react";
-import { RacePredictionResult } from "../types";
+import { BetRecommendation, RacePredictionResult } from "../types";
+import { MyBets } from "./MyBets";
 import { pct, yen } from "../lib/format";
 import { Flash } from "./Flash";
 import { Cloth } from "./Cloth";
@@ -40,6 +41,7 @@ export function TicketPanel({
   saving,
   memo,
   onMemo,
+  onMyBets,
 }: {
   result: RacePredictionResult;
   wakuOf: (umaban: number) => number;
@@ -51,6 +53,7 @@ export function TicketPanel({
   saving: boolean;
   memo: string;
   onMemo: (m: string) => void;
+  onMyBets: (bets: BetRecommendation[]) => void;
 }) {
   const recs = result.recommendations.filter((r) => r.suggested_amount > 0);
   const picks = recs.filter((r) => r.recommended);
@@ -98,6 +101,9 @@ export function TicketPanel({
           <Save className="h-4 w-4" />
           この予想を保存
         </button>
+      </div>
+      <div className="px-4 pt-3">
+        <MyBets result={result} wakuOf={wakuOf} onChange={onMyBets} />
       </div>
       <div className="space-y-2 px-4 pt-2">
         <Segmented label="配分の方針" value={strategy} options={STRATEGIES} onChange={onStrategy} />

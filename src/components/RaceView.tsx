@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { BarChart3, RefreshCw, TrendingUp } from "lucide-react";
-import { RacePredictionResult } from "../types";
+import { RacePredictionResult , BetRecommendation } from "../types";
 import { byPredictedOrder, hhmm, pct, surfaceLabel, ticketHorses } from "../lib/format";
 import { CapStrip } from "./CapStrip";
 import { Cloth } from "./Cloth";
@@ -24,6 +24,7 @@ export function RaceView({
   busy,
   memo,
   onMemo,
+  onMyBets,
 }: {
   result: RacePredictionResult;
   budget: number;
@@ -39,6 +40,7 @@ export function RaceView({
   autoRefresh: boolean;
   busy: boolean;
   memo: string;
+  onMyBets: (bets: BetRecommendation[]) => void;
   onMemo: (m: string) => void;
 }) {
   const [selected, setSelected] = useState<number | null>(null);
@@ -257,6 +259,7 @@ export function RaceView({
             saving={busy}
             memo={memo}
             onMemo={onMemo}
+            onMyBets={onMyBets}
           />
         </div>
       </div>

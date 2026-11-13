@@ -738,6 +738,7 @@ pub fn run_prediction_with(
         }),
         factor_shares,
         combo_odds,
+        my_bets: Vec::new(),
     }
 }
 
@@ -764,6 +765,7 @@ pub fn apply_official_result(
     }
     result.race_info.is_finished = true;
     verify_recommendations_with_payouts(&mut result.recommendations, &payouts);
+    verify_recommendations_with_payouts(&mut result.my_bets, &payouts);
     result.official_payouts = payouts;
     let total_return: u32 = result
         .recommendations

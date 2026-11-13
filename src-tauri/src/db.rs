@@ -70,6 +70,19 @@ pub fn save_prediction(
 
     let is_verified = if result.race_info.is_finished { 1 } else { 0 };
 
+    // 自分の馬券があれば、回収率はそちらで数える（実際に買った額と払戻）
+    let (col_bet, col_return) = if result.my_bets.is_empty() {
+        (result.total_bet, result.total_return)
+    } else {
+        let bet: u32 = result.my_bets.iter().map(|b| b.suggested_amount).sum();
+        let ret = if result.race_info.is_finished {
+            Some(result.my_bets.iter().map(|b| b.actual_return.unwrap_or(0)).sum())
+        } else {
+            None
+        };
+        (bet, ret)
+    };
+
     let full_json =
         serde_json::to_string(&result).map_err(|e| format!("JSONシリアライズエラー: {}", e))?;
 
@@ -109,8 +122,8 @@ pub fn save_prediction(
             honmei_name,
             honmei_umaban,
             honmei_actual_rank,
-            result.total_bet,
-            result.total_return,
+            col_bet,
+            col_return,
             is_verified,
             result.memo,
             now,

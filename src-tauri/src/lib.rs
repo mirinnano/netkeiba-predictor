@@ -225,6 +225,7 @@ async fn refresh_odds(
         None => None,
     };
     let pre_race = current_result.pre_race && !info.is_finished;
+    let my_bets = current_result.my_bets.clone();
     let mut updated = predictor::run_prediction_with(
         info,
         entries,
@@ -237,6 +238,7 @@ async fn refresh_odds(
         jv.as_ref(),
     );
     updated.pre_race = pre_race;
+    updated.my_bets = my_bets;
     Ok(updated)
 }
 
@@ -250,6 +252,7 @@ fn recalculate_prediction(
 ) -> Result<RacePredictionResult, String> {
     // 確定後に組み直した予想は結果を見た後のものなので、確定前フラグを落とす
     let pre_race = current_result.pre_race && !current_result.race_info.is_finished;
+    let my_bets = current_result.my_bets.clone();
     let entries: Vec<HorseEntry> = current_result
         .predictions
         .into_iter()
@@ -273,6 +276,7 @@ fn recalculate_prediction(
         jv.as_ref(),
     );
     updated.pre_race = pre_race;
+    updated.my_bets = my_bets;
     Ok(updated)
 }
 

@@ -249,6 +249,141 @@
   }
 }
 
+/* GII: テープが上から降って消える */
+.ribbon {
+  transform: translateY(-110%);
+  animation-name: ribbon-fall;
+  animation-timing-function: var(--ease-in-out);
+  animation-fill-mode: forwards;
+}
+@keyframes ribbon-fall {
+  80% {
+    opacity: 1;
+  }
+  to {
+    transform: translateY(110vh);
+    opacity: 0;
+  }
+}
+/* GIII: 一瞬白く光り、決勝線が残ってから消える */
+.photo-flash {
+  opacity: 0;
+  animation: photo-flash 520ms var(--ease-out) forwards;
+}
+@keyframes photo-flash {
+  from {
+    opacity: 0.9;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.photo-line {
+  opacity: 0;
+  animation: post-flash 1200ms var(--ease-out) 150ms forwards;
+}
+/* GIII の着順は、少し大きい位置から打ち込む */
+.celebrate-rank.is-stamp {
+  transform: scale(1.25);
+}
+.celebrate-rank.is-stamp.is-in {
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ribbon {
+    display: none;
+  }
+  .photo-flash {
+    animation-duration: 300ms;
+  }
+  .celebrate-rank.is-stamp {
+    transform: none;
+  }
+}
+
+/* G1 のタイトルごとのモチーフ。各粒は自分の --drift と --rot で動く */
+.particle {
+  top: -6vh;
+  opacity: 0;
+  animation-name: particle-fall;
+  animation-timing-function: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  animation-fill-mode: forwards;
+}
+@keyframes particle-fall {
+  from {
+    opacity: 1;
+    transform: translate(0, 0) rotate(0deg);
+  }
+  85% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: translate(var(--drift), 112vh) rotate(var(--rot));
+  }
+}
+.particle-petal {
+  width: 10px;
+  height: 14px;
+  border-radius: 70% 0 70% 0;
+}
+.particle-leaf {
+  width: 13px;
+  height: 13px;
+  border-radius: 0 100% 0 100%;
+}
+.particle-snow {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+}
+.particle-star {
+  width: 12px;
+  height: 12px;
+  clip-path: polygon(50% 0%, 61% 38%, 100% 50%, 61% 62%, 50% 100%, 39% 62%, 0% 50%, 39% 38%);
+}
+.particle-confetti {
+  width: 7px;
+  height: 13px;
+  border-radius: 1px;
+}
+.particle-sand {
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  animation-name: particle-drift;
+}
+@keyframes particle-drift {
+  from {
+    opacity: 0.9;
+    transform: translate(0, 0);
+  }
+  to {
+    opacity: 0;
+    transform: translate(110vw, var(--drift));
+  }
+}
+.particle-spark {
+  opacity: 0;
+  animation: particle-spark 900ms var(--ease-out) forwards;
+}
+@keyframes particle-spark {
+  from {
+    opacity: 1;
+    transform: translate(0, 0) scale(1.4);
+  }
+  to {
+    opacity: 0;
+    transform: translate(var(--dx), var(--dy)) scale(0.6);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .particle,
+  .particle-spark {
+    display: none;
+  }
+}
+
 /* スマホ幅: 横にはみ出した要素でページ全体が横に広がらないようにする（表は各自の横スクロールで見る） */
 @media (max-width: 767px) {
   html,

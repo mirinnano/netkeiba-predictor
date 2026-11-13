@@ -183,6 +183,8 @@ export interface RacePredictionResult {
   saved_at: string | null;
   /** 確定前の情報だけで作った予想なら true（回収率の集計対象） */
   pre_race: boolean;
+  /** 自分の馬券（おすすめから編集）。空なら買い目どおり */
+  my_bets?: BetRecommendation[];
   /** "jravan"（JRA-VAN の履歴で当てはめたモデル）か "basic"（従来の5項目モデル） */
   model_source?: string;
   jv_probs?: [number, number][] | null;

@@ -240,6 +240,9 @@ pub struct RacePredictionResult {
     /// 指数の重み（モデルから自動で決まる、このレースでの各要素の割合）
     #[serde(default)]
     pub factor_shares: Vec<FactorShare>,
+    /// 自分で買った（買う）馬券。おすすめから編集して作る。空なら買い目どおりに買ったとみなす
+    #[serde(default)]
+    pub my_bets: Vec<BetRecommendation>,
 }
 
 /// 組み合わせ馬券の実オッズ。キーは昇順の馬番を "-" で連結したもの（例: "1-2", "1-2-3"）。
