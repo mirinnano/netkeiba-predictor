@@ -1,6 +1,6 @@
 //! JvDump の出力を SQLite に取り込む（前回の続きから。何度実行しても同じ結果になる）。
 //!
-//!   cargo run --release --example jv_ingest -- <keiba.db> <jvdata/out>
+//!   cargo run --release --example jv_ingest -- <keiba.db> <jvdata/out> [読んだ位置の名前の接頭辞（例: 2011/）]
 use netkeiba_predictor_lib::jvstore;
 
 fn main() {
@@ -9,7 +9,8 @@ fn main() {
     let out = std::path::PathBuf::from(args.get(1).expect("JvDump の出力先を指定してください"));
     let mut conn = jvstore::open(&db).expect("DB を開けません");
     let t = std::time::Instant::now();
-    for r in jvstore::ingest_dir(&mut conn, &out).expect("取り込みに失敗しました") {
+    let prefix = args.get(2).cloned().unwrap_or_default();
+    for r in jvstore::ingest_dir_as(&mut conn, &out, &prefix).expect("取り込みに失敗しました") {
         println!(
             "{:<14} {:>12} → {:>12} バイト  反映 {:>8}  削除 {:>5}  対象外 {:>6}",
             r.file, r.from, r.to, r.upserted, r.deleted, r.skipped

@@ -157,28 +157,53 @@ internal static class JvDump
         DateTime started = DateTime.Now;
         try
         {
+            // JVGets はレコードを Shift_JIS のバイト列のまま返す。JVRead（文字列）は Windows の言語設定で
+            // 文字コードを変換するので、日本語でない環境（GitHub Actions など）では全角文字が壊れて桁がずれる
+            bool useGets = true;
             while (true)
             {
                 string buff = "";
+                byte[] bytes = null;
                 int size = 110000;
                 string fileName = "";
-                int r = jv.JVRead(ref buff, ref size, ref fileName);
-                if (r > 0)
+                int r;
+                if (useGets)
+                {
+                    try
+                    {
+                        r = jv.JVGets(ref bytes, size, ref fileName);
+                    }
+                    catch (Exception e)
+                    {
+                        Console.WriteLine("JVGets が使えないので JVRead に切り替えます: " + e.Message);
+                        useGets = false;
+                        continue;
+                    }
+                }
+                else
+                {
+                    r = jv.JVRead(ref buff, ref size, ref fileName);
+                    if (r > 0)
+                    {
+                        bytes = Sjis.GetBytes(buff);
+                    }
+                }
+                if (r > 0 && bytes != null)
                 {
                     // 先頭2文字がレコード種別（RA, SE, HR, O1 など）
-                    string spec = buff.Length >= 2 ? buff.Substring(0, 2) : "__";
+                    string spec = bytes.Length >= 2 ? Encoding.ASCII.GetString(bytes, 0, 2) : "__";
                     FileStream w;
                     if (!writers.TryGetValue(spec, out w))
                     {
                         w = new FileStream(Path.Combine(dir, spec + ".txt"), FileMode.Append, FileAccess.Write);
                         writers[spec] = w;
                     }
-                    WriteRecord(w, buff, r);
+                    WriteRecord(w, bytes, r);
                     records++;
-                    if (until != null && buff.Length >= 19)
+                    if (until != null && bytes.Length >= 19)
                     {
                         // 開催年月日（12〜19 バイト目、ASCII）
-                        string d = buff.Substring(11, 8);
+                        string d = Encoding.ASCII.GetString(bytes, 11, 8);
                         if (d.Length == 8 && char.IsDigit(d[0]) && d.CompareTo("19000101") > 0 && (fileMin == null || d.CompareTo(fileMin) < 0))
                         {
                             fileMin = d;
@@ -254,9 +279,8 @@ internal static class JvDump
 
     /// JVRead の戻り値（実際に読んだバイト数）で切り詰めて、Shift_JIS のバイト列のまま書く。
     /// 受け取る文字列はバッファの大きさまで埋められて返ることがあるので、全部書くと巨大になる。
-    private static void WriteRecord(FileStream w, string buff, int readBytes)
+    private static void WriteRecord(FileStream w, byte[] all, int readBytes)
     {
-        byte[] all = Sjis.GetBytes(buff);
         int n = Math.Min(readBytes, all.Length);
         if (!reportedPadding && all.Length > readBytes + 2)
         {
@@ -294,7 +318,7 @@ internal static class JvDump
                 int r = jv.JVRead(ref buff, ref size, ref fileName);
                 if (r > 0)
                 {
-                    WriteRecord(w, buff, r);
+                    WriteRecord(w, Sjis.GetBytes(buff), r);
                     records++;
                 }
                 else if (r == 0)

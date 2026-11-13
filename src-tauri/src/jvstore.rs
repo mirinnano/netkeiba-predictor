@@ -72,11 +72,17 @@ pub struct IngestReport {
 
 /// out_dir（JvDump の出力先）の RACE/RA・RACE/SE・SLOP/HC・WOOD/WC を、前回の続きから取り込む
 pub fn ingest_dir(conn: &mut Connection, out_dir: &Path) -> rusqlite::Result<Vec<IngestReport>> {
+    ingest_dir_as(conn, out_dir, "")
+}
+
+/// ingest_dir と同じ。読んだ位置を `<prefix>RACE/RA.txt` のような名前で覚える
+/// （年ごとに別に取り出したフォルダを取り込むとき、ほかのフォルダの位置と混ざらないように）
+pub fn ingest_dir_as(conn: &mut Connection, out_dir: &Path, prefix: &str) -> rusqlite::Result<Vec<IngestReport>> {
     let mut reports = Vec::new();
     for rel in ["RACE/RA.txt", "RACE/SE.txt", "SLOP/HC.txt", "WOOD/WC.txt"] {
         let path = out_dir.join(rel);
         if path.exists() {
-            reports.push(ingest_file(conn, &path, rel)?);
+            reports.push(ingest_file(conn, &path, &format!("{}{}", prefix, rel))?);
         }
     }
     Ok(reports)
