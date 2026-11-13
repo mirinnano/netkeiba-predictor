@@ -169,15 +169,40 @@ internal static class JvDump
                 int r;
                 if (useGets)
                 {
+                    // バイト配列は VARIANT（object）で受け取る。byte[] のまま渡すと値が戻らない（2026-11-13 確認）
+                    object o = null;
                     try
                     {
-                        r = jv.JVGets(ref bytes, size, ref fileName);
+                        r = jv.JVGets(ref o, size, ref fileName);
                     }
                     catch (Exception e)
                     {
+                        if (Encoding.Default.CodePage != 932)
+                        {
+                            // 日本語でない環境で JVRead に戻すと文字が壊れるので、ここで止める
+                            Console.Error.WriteLine("JVGets が使えません（" + e.Message + "）。日本語でない環境では JVRead を使えないので中止します");
+                            exitCode = 1;
+                            break;
+                        }
                         Console.WriteLine("JVGets が使えないので JVRead に切り替えます: " + e.Message);
                         useGets = false;
                         continue;
+                    }
+                    bytes = o as byte[];
+                    if (bytes == null && o is Array)
+                    {
+                        Array a = (Array)o;
+                        bytes = new byte[a.Length];
+                        for (int i = 0; i < a.Length; i++)
+                        {
+                            bytes[i] = Convert.ToByte(a.GetValue(i));
+                        }
+                    }
+                    if (r > 0 && bytes == null)
+                    {
+                        Console.Error.WriteLine("JVGets=" + r + " ですがバイト列が戻りませんでした（型: " + (o == null ? "null" : o.GetType().FullName) + "）");
+                        exitCode = 1;
+                        break;
                     }
                 }
                 else
