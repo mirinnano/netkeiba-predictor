@@ -127,19 +127,25 @@ fn main() {
 
 /// 2021〜2025年の全レースで「市場＋モデル」と「モデルのみ」を当てはめ、アプリ用の係数ファイルを書く
 fn export_coefficients(data: &[(String, Vec<Runner>)], path: &str) {
-    let all: Vec<&Vec<Runner>> = data.iter().map(|(_, r)| r).collect();
+    // 最初の年は履歴の立ち上がりなので学習に使わない（2011年から読んだときは 2012年から学習）。2021年から読むときは従来どおり全部使う
+    let first = data.first().map(|d| d.0[0..4].to_string()).unwrap_or_default();
+    let skip_first = first.as_str() < "2021";
+    let all: Vec<&Vec<Runner>> = data.iter().filter(|(d, _)| !skip_first || d[0..4] != first).map(|(_, r)| r).collect();
+    let from_y = data.iter().find(|(d, _)| !skip_first || d[0..4] != first).map(|d| d.0[0..4].to_string()).unwrap_or_default();
     let cols: Vec<usize> = ADOPTED.to_vec();
     let m = fit(&all, true, &cols, L2);
     let s = fit(&all, false, &cols, L2);
     let fmt = |v: &[f64]| v.iter().map(|x| format!("{:.6}", x)).collect::<Vec<_>>().join(", ");
     let src = format!(
         "//! jvmodel の係数（自動生成）。`cargo run --release --example jv_model -- <keiba.db> --export src/jv_coef.rs` で作り直す。\n\
-         //! 学習: 2021〜2025年の JRA 平地 {} レース、1着の多項ロジット、L2 {}。\n\
+         //! 学習: {}〜2025年の JRA 平地 {} レース、1着の多項ロジット、L2 {}。アプリの Engine は {} 年から履歴を読むこと（特徴量の定義を揃えるため）。\n\
          pub const MARKET_GAMMA: f64 = {:.6};\n\
          pub const MARKET_BETA: [f64; {}] = [{}];\n\
          pub const SOLO_BETA: [f64; {}] = [{}];\n",
+        from_y,
         all.len(),
         L2,
+        first,
         m[0],
         cols.len(),
         fmt(&m[1..]),

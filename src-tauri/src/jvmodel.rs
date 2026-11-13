@@ -572,10 +572,13 @@ pub fn win_probs_detail(features: &[Vec<f64>], odds: &[Option<f64>]) -> (Vec<f64
     (softmax(&u), with_market, contrib)
 }
 
+/// 履歴を読み始める日。係数（jv_coef.rs）を当てはめたときと揃える（基準タイムはこの年のレースで作る）
+pub const HISTORY_FROM: &str = "20110101";
+
 /// アプリ用: `until`（yyyymmdd）の前日までの確定成績で Engine を作る
 pub fn build_engine(conn: &rusqlite::Connection, until: u32) -> rusqlite::Result<Engine> {
     let until_s = until.to_string();
-    let mut races = crate::jvstore::load_races(conn, "20210101", &until_s)?;
+    let mut races = crate::jvstore::load_races(conn, HISTORY_FROM, &until_s)?;
     races.retain(|r| r.kubun == '7');
     races.sort_by(|a, b| (&a.date, &a.race_id).cmp(&(&b.date, &b.race_id)));
     let recent_from = {

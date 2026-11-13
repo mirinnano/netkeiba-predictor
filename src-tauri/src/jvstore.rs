@@ -434,11 +434,11 @@ pub fn load_works(conn: &Connection) -> rusqlite::Result<std::collections::HashM
     Ok(m)
 }
 
-/// アプリ用: 調教の基準を作る 2021年分と、`recent_from`（yyyymmdd）以降だけを読む（全期間を持つと重いため）
+/// アプリ用: 調教の基準を作る年（坂路 2011年・ウッド 2021年）の分と、`recent_from`（yyyymmdd）以降だけを読む（全期間を持つと重いため）
 pub fn load_works_for(conn: &Connection, recent_from: u32) -> rusqlite::Result<std::collections::HashMap<String, Vec<JvWork>>> {
     let mut stmt = conn.prepare(
         "SELECT horse_id, slope, center, course, date, time, t4, last1, lap2 FROM works
-         WHERE (date >= 20210101 AND date < 20220101) OR date >= ?1 ORDER BY horse_id, date, time",
+         WHERE (date >= 20110101 AND date < 20120101) OR (date >= 20210101 AND date < 20220101) OR date >= ?1 ORDER BY horse_id, date, time",
     )?;
     let mut m: std::collections::HashMap<String, Vec<JvWork>> = std::collections::HashMap::new();
     let rows = stmt.query_map(params![recent_from as i64], |r| {
