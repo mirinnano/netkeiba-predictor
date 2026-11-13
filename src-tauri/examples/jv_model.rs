@@ -348,6 +348,8 @@ fn evaluate(data: &[(String, Vec<Runner>)], classes: &[f64]) {
     let mut coefs: Vec<Vec<f64>> = Vec::new();
     const TH: [f64; 4] = [0.8, 0.9, 1.0, 1.1];
     let mut roi = [(0.0f64, 0.0f64); 4];
+    // クラス別・レースごとの（賭け額, 払戻）。期待値 1.0 以上の単勝を 100 円ずつ
+    let mut per_race: Vec<(usize, f64, f64)> = Vec::new();
     println!("\n[時系列ローリング検証: 1着の対数損失]");
     for k in 4..folds {
         let train: Vec<&Vec<Runner>> = data[..k * per].iter().map(|(_, r)| r).collect();
@@ -363,8 +365,22 @@ fn evaluate(data: &[(String, Vec<Runner>)], classes: &[f64]) {
             }
             if vi == 2 {
                 coefs.push(b.clone());
-                for (_, race) in test {
+                for (j, (_, race)) in test.iter().enumerate() {
                     let p = race_probs(race, true, cols, &b);
+                    let c = classes[k * per + j];
+                    let seg = if c < 3.5 { 0 } else if c < 4.9 { 1 } else { 2 };
+                    let (mut bet, mut ret) = (0.0, 0.0);
+                    for (i, r) in race.iter().enumerate() {
+                        if p[i] * r.odds >= 1.0 {
+                            bet += 100.0;
+                            if r.win {
+                                ret += r.odds * 100.0;
+                            }
+                        }
+                    }
+                    if bet > 0.0 {
+                        per_race.push((seg, bet, ret));
+                    }
                     for (i, r) in race.iter().enumerate() {
                         for (ti, t) in TH.iter().enumerate() {
                             if p[i] * r.odds >= *t {
@@ -417,6 +433,32 @@ fn evaluate(data: &[(String, Vec<Runner>)], classes: &[f64]) {
         let mk: Vec<f64> = idx.iter().map(|&i| pooled[0][i]).collect();
         let (m, lo, hi) = paired_ci(&a, &b);
         println!("  {:<18} {:>5}R 市場 {:.4} 差 {:+.4} [{:+.4}, {:+.4}]{}", name, idx.len(), avg(&mk), m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
+    }
+    println!("\n[期待値 1.0 以上の単勝をクラス別に（レース単位の 95% 区間）]");
+    for (seg, name) in [(0usize, "条件戦"), (1, "OP・L"), (2, "重賞")] {
+        let v: Vec<&(usize, f64, f64)> = per_race.iter().filter(|x| x.0 == seg).collect();
+        if v.is_empty() {
+            continue;
+        }
+        let bet: f64 = v.iter().map(|x| x.1).sum();
+        let ret: f64 = v.iter().map(|x| x.2).sum();
+        let hit = v.iter().filter(|x| x.2 > 0.0).count();
+        let mut rets: Vec<f64> = v.iter().map(|x| x.2).collect();
+        rets.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        let top: f64 = rets.iter().take((v.len() / 20).max(1)).sum();
+        // レースを復元抽出して回収率の区間を出す
+        let mut seed: u64 = 0x2545F4914F6CDD1D;
+        let mut next = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+        let mut rs: Vec<f64> = (0..2000).map(|_| {
+            let (mut b, mut r) = (0.0, 0.0);
+            for _ in 0..v.len() { let x = v[(next() % v.len() as u64) as usize]; b += x.1; r += x.2; }
+            r / b * 100.0
+        }).collect();
+        rs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "  {:<6} 買ったレース {:>5} / 的中 {:>4}（{:.0}%） / 回収率 {:.1}% [{:.0}%, {:.0}%] / 払戻の {:.0}% が上位5%のレース",
+            name, v.len(), hit, hit as f64 / v.len() as f64 * 100.0, ret / bet * 100.0, rs[50], rs[1949], top / ret.max(1.0) * 100.0
+        );
     }
     println!("\n[単勝の回収率（市場+全特徴量, 検証区間, 確定オッズ）]");
     for (ti, t) in TH.iter().enumerate() {
