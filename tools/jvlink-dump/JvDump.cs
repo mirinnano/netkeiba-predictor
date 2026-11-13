@@ -22,6 +22,52 @@ internal static class JvDump
 {
     private const string Sid = "UNKNOWN";
     private static readonly Encoding Sjis = Encoding.GetEncoding(932);
+    private static readonly int Acp = Encoding.Default.CodePage;
+    private static readonly Encoding AcpStrict = Encoding.GetEncoding(Encoding.Default.CodePage, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
+    private static long lostChars = 0;
+
+    /// JVRead が返した文字列を、元の Shift_JIS のバイト列に戻す。
+    /// JV-Link は Windows の ANSI コードページ（ACP）で変換する。日本語の Windows（932）ならそのまま Shift_JIS に戻せるが、
+    /// 日本語でない Windows（GitHub Actions は 1252）では 1 バイトずつ 1 文字に変換されているので、ACP で 1 文字ずつ逆変換する
+    /// （1252 の未定義の 5 バイトは U+0081 などそのままの番号の文字になっている）。2026-11-13 確認。
+    private static byte[] ToRecordBytes(string s)
+    {
+        if (Acp == 932)
+        {
+            return Sjis.GetBytes(s);
+        }
+        byte[] outb = new byte[s.Length];
+        char[] one = new char[1];
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (c < 0x80)
+            {
+                outb[i] = (byte)c;
+                continue;
+            }
+            one[0] = c;
+            try
+            {
+                byte[] b = AcpStrict.GetBytes(one);
+                outb[i] = b.Length == 1 ? b[0] : (byte)'?';
+                if (b.Length != 1) lostChars++;
+            }
+            catch (EncoderFallbackException)
+            {
+                if (c < 0x100)
+                {
+                    outb[i] = (byte)c;
+                }
+                else
+                {
+                    outb[i] = (byte)'?';
+                    lostChars++;
+                }
+            }
+        }
+        return outb;
+    }
 
     [STAThread]
     private static int Main(string[] args)
@@ -157,61 +203,16 @@ internal static class JvDump
         DateTime started = DateTime.Now;
         try
         {
-            // JVGets はレコードを Shift_JIS のバイト列のまま返す。JVRead（文字列）は Windows の言語設定で
-            // 文字コードを変換するので、日本語でない環境（GitHub Actions など）では全角文字が壊れて桁がずれる
-            bool useGets = true;
             while (true)
             {
                 string buff = "";
                 byte[] bytes = null;
                 int size = 110000;
                 string fileName = "";
-                int r;
-                if (useGets)
+                int r = jv.JVRead(ref buff, ref size, ref fileName);
+                if (r > 0)
                 {
-                    // バイト配列は VARIANT（object）で受け取る。byte[] のまま渡すと値が戻らない（2026-11-13 確認）
-                    object o = null;
-                    try
-                    {
-                        r = jv.JVGets(ref o, size, ref fileName);
-                    }
-                    catch (Exception e)
-                    {
-                        if (Encoding.Default.CodePage != 932)
-                        {
-                            // 日本語でない環境で JVRead に戻すと文字が壊れるので、ここで止める
-                            Console.Error.WriteLine("JVGets が使えません（" + e.Message + "）。日本語でない環境では JVRead を使えないので中止します");
-                            exitCode = 1;
-                            break;
-                        }
-                        Console.WriteLine("JVGets が使えないので JVRead に切り替えます: " + e.Message);
-                        useGets = false;
-                        continue;
-                    }
-                    bytes = o as byte[];
-                    if (bytes == null && o is Array)
-                    {
-                        Array a = (Array)o;
-                        bytes = new byte[a.Length];
-                        for (int i = 0; i < a.Length; i++)
-                        {
-                            bytes[i] = Convert.ToByte(a.GetValue(i));
-                        }
-                    }
-                    if (r > 0 && bytes == null)
-                    {
-                        Console.Error.WriteLine("JVGets=" + r + " ですがバイト列が戻りませんでした（型: " + (o == null ? "null" : o.GetType().FullName) + "）");
-                        exitCode = 1;
-                        break;
-                    }
-                }
-                else
-                {
-                    r = jv.JVRead(ref buff, ref size, ref fileName);
-                    if (r > 0)
-                    {
-                        bytes = Sjis.GetBytes(buff);
-                    }
+                    bytes = ToRecordBytes(buff);
                 }
                 if (r > 0 && bytes != null)
                 {
@@ -281,7 +282,7 @@ internal static class JvDump
             jv.JVClose();
         }
         Console.WriteLine();
-        Console.WriteLine("レコード数 " + records);
+        Console.WriteLine("レコード数 " + records + "（ACP " + Acp + "、戻せなかった文字 " + lostChars + "）");
         // 最後まで読めたときだけ時刻を進める。途中で止まったのに進めると、その分を二度と取れなくなる
         if (exitCode == 0 && !stoppedEarly && lastTimestamp.Length > 0)
         {
@@ -343,7 +344,7 @@ internal static class JvDump
                 int r = jv.JVRead(ref buff, ref size, ref fileName);
                 if (r > 0)
                 {
-                    WriteRecord(w, Sjis.GetBytes(buff), r);
+                    WriteRecord(w, ToRecordBytes(buff), r);
                     records++;
                 }
                 else if (r == 0)
