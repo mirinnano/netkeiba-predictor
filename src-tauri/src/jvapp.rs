@@ -14,6 +14,33 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+/// Android: Mac から転送された DB（アプリ専用の外部ストレージ `Android/data/<id>/files/keiba.db`）があれば、
+/// アプリのデータフォルダの keiba.db に置き換える（adb の shell から書ける場所なので、release 版にも転送できる）
+#[cfg(target_os = "android")]
+pub fn import_pushed_db(app_data: &Path) {
+    let src = PathBuf::from("/storage/emulated/0/Android/data/com.keibascope.predictor/files/keiba.db");
+    if !src.exists() {
+        return;
+    }
+    let tmp = app_data.join("keiba.db.importing");
+    let ok = std::fs::create_dir_all(app_data).is_ok()
+        && std::fs::copy(&src, &tmp).is_ok()
+        && rusqlite::Connection::open(&tmp)
+            .and_then(|c| c.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0)))
+            .map(|s| s == "ok")
+            .unwrap_or(false);
+    if ok {
+        for ext in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(app_data.join(format!("keiba.db{}", ext)));
+        }
+        if std::fs::rename(&tmp, app_data.join("keiba.db")).is_ok() {
+            let _ = std::fs::remove_file(&src);
+        }
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 pub fn db_path(app_data: &Path) -> Option<PathBuf> {
     if let Ok(p) = std::env::var("KEIBA_DB") {
         let p = PathBuf::from(p);

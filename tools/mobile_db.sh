@@ -14,9 +14,9 @@ ls -lh "$OUT"
 if [ "$2" = "--push" ]; then
   ADB="${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb"
   PKG=com.keibascope.predictor
-  "$ADB" push "$OUT" /data/local/tmp/keiba.db
-  # デバッグ版のアプリのデータフォルダ（app_data_dir）に置く
-  # Android の app_data_dir はアプリのデータフォルダの直下（files/ ではない）
-  "$ADB" shell "run-as $PKG sh -c 'cp /data/local/tmp/keiba.db ./keiba.db && ls -l keiba.db'"
-  "$ADB" shell rm /data/local/tmp/keiba.db
+  # アプリ専用の外部ストレージに置く。アプリは次の起動時に検査してデータフォルダへ移す（debug 版・release 版どちらでも）
+  "$ADB" shell mkdir -p /sdcard/Android/data/$PKG/files
+  "$ADB" push "$OUT" /sdcard/Android/data/$PKG/files/keiba.db
+  "$ADB" shell am force-stop $PKG
+  echo "転送しました。アプリを起動すると取り込みます。"
 fi

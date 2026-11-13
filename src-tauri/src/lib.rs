@@ -236,6 +236,11 @@ async fn verify_saved_race_result(
 pub fn run() {
     tauri::Builder::default()
         .setup(|_app| {
+            // Android: 転送された DB があれば取り込む
+            #[cfg(target_os = "android")]
+            if let Ok(d) = _app.path().app_data_dir() {
+                jvapp::import_pushed_db(&d);
+            }
             // デスクトップだけ: 起動時にウィンドウを前に出す（Android にはウィンドウ操作がない）
             #[cfg(desktop)]
             if let Some(window) = _app.get_webview_window("main") {

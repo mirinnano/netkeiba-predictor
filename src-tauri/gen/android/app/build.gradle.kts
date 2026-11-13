@@ -14,6 +14,14 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// リリース署名: ~/.keibascope/keystore.properties（リポジトリの外。なければ署名なしでビルドする）
+val keystoreProperties = Properties().apply {
+    val f = File(System.getProperty("user.home"), ".keibascope/keystore.properties")
+    if (f.exists()) {
+        f.inputStream().use { load(it) }
+    }
+}
+
 android {
     compileSdk = 37
     namespace = "com.keibascope.predictor"
@@ -24,6 +32,16 @@ android {
         targetSdk = 37
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    signingConfigs {
+        if (keystoreProperties.containsKey("storeFile")) {
+            create("release") {
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -39,6 +57,7 @@ android {
             }
         }
         getByName("release") {
+            signingConfigs.findByName("release")?.let { signingConfig = it }
             optimization {
                enable = true
             }
