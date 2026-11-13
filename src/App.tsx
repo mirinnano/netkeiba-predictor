@@ -21,6 +21,17 @@ import { JvDataPanel } from "./components/JvDataPanel";
 import { TodayView } from "./components/TodayView";
 import { WinCelebration } from "./components/WinCelebration";
 import { myTotals } from "./components/MyBets";
+import { listen } from "@tauri-apps/api/event";
+import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
+
+/** 通知の許可を一度だけ求める（払戻と発走前の知らせに使う） */
+async function ensureNotifyPermission() {
+  try {
+    if (!(await isPermissionGranted())) await requestPermission();
+  } catch {
+    /* 通知が使えない環境では何もしない */
+  }
+}
 
 type Tab = "today" | "race" | "browser" | "bets" | "history";
 
@@ -208,7 +219,8 @@ export default function App() {
   const minutesToPost = post ? Math.round((post.getTime() - now.getTime()) / 60000) : null;
   const autoRefresh = !!prediction && !prediction.race_info.is_finished && minutesToPost !== null && minutesToPost <= 20 && minutesToPost >= -2;
   // 払戻速報: 発走 1 分後から 45 分後まで、20 秒ごとに結果ページを見に行く。出たらすぐ当てはめる
-  const watchPayouts = !!prediction && !prediction.race_info.is_finished && minutesToPost !== null && minutesToPost <= -1 && minutesToPost >= -45;
+  // 保存済みのレースはアプリ本体が後ろでも見張るので、ここでは保存していないレースだけ見る
+  const watchPayouts = !!prediction && !prediction.saved_at && !prediction.race_info.is_finished && minutesToPost !== null && minutesToPost <= -1 && minutesToPost >= -45;
   const checking = useRef(false);
   const latest = useRef(prediction);
   latest.current = prediction;
@@ -237,6 +249,36 @@ export default function App() {
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watchPayouts, prediction?.race_info.race_id]);
+
+  // 後ろで確定したレースを受け取り、開いているレースなら差し替え、当たりなら演出を出す
+  useEffect(() => {
+    const take = async () => {
+      try {
+        const done = await invoke<RacePredictionResult[]>("take_pending_payouts");
+        if (done.length === 0) return;
+        const open = latest.current;
+        const same = open && done.find((d) => d.race_info.race_id === open.race_info.race_id);
+        if (same) setPrediction(same);
+        const hit = done.find((d) => myTotals(d).ret > 0);
+        if (hit) setCelebrate(hit);
+        else showToast(`${done[0].race_info.race_name}：今回は外れです`);
+        refreshDashboard();
+      } catch {
+        /* noop */
+      }
+    };
+    take();
+    const un = listen("payout", () => {
+      if (document.visibilityState === "visible") take();
+    });
+    const onVis = () => document.visibilityState === "visible" && take();
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      un.then((f) => f());
+      document.removeEventListener("visibilitychange", onVis);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 30000);
@@ -276,6 +318,7 @@ export default function App() {
     } catch {
       /* 覚えられなくても、この画面の中では使える */
     }
+    if (bets.length > 0) ensureNotifyPermission();
     const seq = ++myBetsSeq.current;
     window.setTimeout(async () => {
       if (seq !== myBetsSeq.current || bets.length === 0) return;
@@ -301,6 +344,7 @@ export default function App() {
   const save = async () => {
     if (!prediction) return;
     setBusy(true);
+    ensureNotifyPermission();
     try {
       const saved = await invoke<RacePredictionResult>("save_prediction_record", {
         result: { ...prediction, memo },

@@ -23,6 +23,7 @@ regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
+tauri-plugin-notification = "2"
 
 # HTTPS: デスクトップは OS の TLS、Android は rustls（OpenSSL を持ち込まないため）
 [target.'cfg(not(target_os = "android"))'.dependencies]

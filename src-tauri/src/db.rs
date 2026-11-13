@@ -304,3 +304,18 @@ mod tests {
         let _ = std::fs::remove_file(&db);
     }
 }
+
+/// まだ結果を照合していない保存済みの予想（払戻の見張り用）
+pub fn unverified_predictions(db_path: &PathBuf) -> Result<Vec<RacePredictionResult>, String> {
+    let conn = get_db_connection(db_path)?;
+    let mut stmt = conn
+        .prepare("SELECT full_json FROM predictions WHERE is_verified = 0")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .filter_map(|r| r.ok())
+        .filter_map(|j| serde_json::from_str::<RacePredictionResult>(&j).ok())
+        .collect())
+}

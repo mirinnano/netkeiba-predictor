@@ -5,6 +5,7 @@ pub mod jvdata;
 pub mod jvmodel;
 pub mod jvstore;
 pub mod models;
+pub mod payout_watch;
 pub mod predictor;
 pub mod scraper;
 pub mod std_times;
@@ -342,9 +343,17 @@ async fn check_payouts(current_result: RacePredictionResult) -> Result<Option<Ra
     Ok(Some(predictor::apply_official_result(current_result, &rows, payouts)))
 }
 
+/// 後ろで見張っていたあいだに確定したレース。画面が前に戻ったら受け取って演出を出す
+#[tauri::command]
+fn take_pending_payouts(state: tauri::State<payout_watch::Pending>) -> Vec<RacePredictionResult> {
+    std::mem::take(&mut *state.0.lock().unwrap())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .manage(payout_watch::Pending::default())
         .setup(|_app| {
             // Android: 転送された DB があれば取り込む
             #[cfg(target_os = "android")]
@@ -357,6 +366,10 @@ pub fn run() {
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();
+            }
+            // 保存した予想の払戻を見張る（Android では前面サービスがプロセスを生かす）
+            if let Ok(d) = _app.path().app_data_dir() {
+                payout_watch::spawn(_app.handle().clone(), resolve_db_path(_app.handle()), d);
             }
             Ok(())
         })
@@ -373,6 +386,7 @@ pub fn run() {
             get_roi_dashboard,
             verify_saved_race_result,
             check_payouts,
+            take_pending_payouts,
             jv_status,
             jv_import,
         ])
