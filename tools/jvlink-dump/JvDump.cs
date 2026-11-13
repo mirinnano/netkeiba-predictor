@@ -5,8 +5,9 @@
 // JV-Link は 32 ビットの COM なので、必ず x86 でビルドして実行する（build.bat 参照）。
 //
 //   JvDump setup                                   利用キーなどの設定画面を開く
-//   JvDump open <データ種別> <開始日時> <オプション> <出力先>
+//   JvDump open <データ種別> <開始日時> <オプション> <出力先> [打ち切る開催日 yyyyMMdd]
 //       例: JvDump open RACE 20210101000000 4 out
+//       例: JvDump open RACE 20110101000000 4 out 20111231（2011年分だけ読んで打ち切る）
 //   JvDump update <データ種別> <出力先>             前回の続きから差分だけ取る（通常データ）
 //       例: JvDump update RACE out
 //   JvDump rt <データ種別> <キー> <出力先>          速報系（時系列オッズなど）を1件取る
@@ -67,9 +68,10 @@ internal static class JvDump
             Console.WriteLine("JVSetUIProperties=" + rc);
             return rc == 0 ? 0 : 1;
         }
-        if (mode == "open" && args.Length == 5)
+        if (mode == "open" && (args.Length == 5 || args.Length == 6))
         {
-            return OpenAndDump(jv, args[1], args[2], int.Parse(args[3]), args[4]);
+            // 6番目の引数（yyyyMMdd）を付けると、その日より後のレースだけのファイルが続いたところで読むのをやめる（年ごとに分けて並列に取るため）
+            return OpenAndDump(jv, args[1], args[2], int.Parse(args[3]), args[4], args.Length == 6 ? args[5] : null);
         }
         if (mode == "update" && args.Length == 3)
         {
@@ -97,13 +99,13 @@ internal static class JvDump
     {
         Console.Error.WriteLine("使い方:");
         Console.Error.WriteLine("  JvDump setup");
-        Console.Error.WriteLine("  JvDump open <データ種別> <開始日時 yyyyMMddHHmmss> <オプション> <出力先>");
+        Console.Error.WriteLine("  JvDump open <データ種別> <開始日時 yyyyMMddHHmmss> <オプション> <出力先> [打ち切る開催日 yyyyMMdd]");
         Console.Error.WriteLine("  JvDump update <データ種別> <出力先>");
         Console.Error.WriteLine("  JvDump rt <データ種別> <キー> <出力先>");
     }
 
     /// 蓄積系データ（RACE, SLOP, WOOD, DIFN など）を取り出す
-    private static int OpenAndDump(dynamic jv, string dataspec, string fromtime, int option, string outRoot)
+    private static int OpenAndDump(dynamic jv, string dataspec, string fromtime, int option, string outRoot, string until = null)
     {
         int readCount = 0;
         int downloadCount = 0;
@@ -124,8 +126,8 @@ internal static class JvDump
             return 1;
         }
 
-        // ダウンロードが終わるのを待つ
-        while (downloadCount > 0)
+        // ダウンロードが終わるのを待つ（until があるときは待たずに読み始め、届いた順に読む）
+        while (downloadCount > 0 && until == null)
         {
             int done = jv.JVStatus();
             if (done < 0)
@@ -148,6 +150,11 @@ internal static class JvDump
         Dictionary<string, FileStream> writers = new Dictionary<string, FileStream>();
         long records = 0;
         int exitCode = 0;
+        // until 用: ファイルごとの最小の開催年月日。until より後だけのファイルが 3 つ続いたら打ち切る
+        string fileMin = null;
+        int filesAfter = 0;
+        bool stoppedEarly = false;
+        DateTime started = DateTime.Now;
         try
         {
             while (true)
@@ -168,9 +175,18 @@ internal static class JvDump
                     }
                     WriteRecord(w, buff, r);
                     records++;
+                    if (until != null && buff.Length >= 19)
+                    {
+                        // 開催年月日（12〜19 バイト目、ASCII）
+                        string d = buff.Substring(11, 8);
+                        if (d.Length == 8 && char.IsDigit(d[0]) && d.CompareTo("19000101") > 0 && (fileMin == null || d.CompareTo(fileMin) < 0))
+                        {
+                            fileMin = d;
+                        }
+                    }
                     if (records % 10000 == 0)
                     {
-                        Console.Write("\rレコード " + records + "   ");
+                        Console.WriteLine("レコード " + records + "（" + (int)(DateTime.Now - started).TotalMinutes + " 分）" + (fileMin != null ? " 直近の開催日 " + fileMin : ""));
                     }
                 }
                 else if (r == 0)
@@ -179,7 +195,19 @@ internal static class JvDump
                 }
                 else if (r == -1)
                 {
-                    continue; // ファイルの切り替わり
+                    // ファイルの切り替わり
+                    if (until != null && fileMin != null)
+                    {
+                        filesAfter = fileMin.CompareTo(until) > 0 ? filesAfter + 1 : 0;
+                        if (filesAfter >= 3)
+                        {
+                            Console.WriteLine("開催日 " + until + " より後のファイルが続いたので打ち切ります");
+                            stoppedEarly = true;
+                            break;
+                        }
+                    }
+                    fileMin = null;
+                    continue;
                 }
                 else if (r == -3)
                 {
@@ -205,7 +233,7 @@ internal static class JvDump
         Console.WriteLine();
         Console.WriteLine("レコード数 " + records);
         // 最後まで読めたときだけ時刻を進める。途中で止まったのに進めると、その分を二度と取れなくなる
-        if (exitCode == 0 && lastTimestamp.Length > 0)
+        if (exitCode == 0 && !stoppedEarly && lastTimestamp.Length > 0)
         {
             File.WriteAllText(Path.Combine(dir, "lastfiletimestamp.txt"), lastTimestamp);
         }
