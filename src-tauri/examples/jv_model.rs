@@ -308,7 +308,8 @@ fn bets(data: &[(String, Vec<Runner>)], classes: &[f64], race_ids: &[String], db
     let cols: Vec<usize> = ADOPTED.to_vec();
     let folds = 8;
     let per = data.len() / folds;
-    let strategies = ["balance", "hit_focus", "value_focus"];
+    // 2026-11-14 以降、買い目は配分の方針に左右されないので 1 通りだけ
+    let strategies = ["balance"];
     // (戦略, クラス区分, 券種, 賭け, 払戻) と、レースごとの (戦略, 区分, 賭け, 払戻)
     let mut tickets: Vec<(usize, usize, String, f64, f64)> = Vec::new();
     let mut races: Vec<(usize, usize, f64, f64)> = Vec::new();
@@ -337,7 +338,8 @@ fn bets(data: &[(String, Vec<Runner>)], classes: &[f64], race_ids: &[String], db
                     key.sort_unstable();
                     let y = p_map.get(&(t.bet_type.clone(), key)).copied().unwrap_or(0) as f64;
                     let ret = y * t.suggested_amount as f64 / 100.0;
-                    tickets.push((si, seg, t.bet_type.clone(), t.suggested_amount as f64, ret));
+                    let label = if t.confidence == "期待値1.0未満" { format!("{}(1.0未満)", t.bet_type) } else { t.bet_type.clone() };
+                    tickets.push((si, seg, label, t.suggested_amount as f64, ret));
                     rb += t.suggested_amount as f64;
                     rr += ret;
                 }
@@ -375,7 +377,7 @@ fn bets(data: &[(String, Vec<Runner>)], classes: &[f64], race_ids: &[String], db
                 name, v.len(), r / b * 100.0, lo, hi, hit as f64 / v.len() as f64 * 100.0, plus as f64 / v.len() as f64 * 100.0, top / r.max(1.0) * 100.0
             );
         }
-        for bt in ["単勝", "馬連", "ワイド", "3連複"] {
+        for bt in ["単勝", "単勝(1.0未満)", "馬連", "ワイド", "3連複"] {
             let v: Vec<&(usize, usize, String, f64, f64)> = tickets.iter().filter(|x| x.0 == si && x.2 == bt).collect();
             if v.is_empty() { continue; }
             let (b, r) = v.iter().fold((0.0, 0.0), |a, x| (a.0 + x.3, a.1 + x.4));

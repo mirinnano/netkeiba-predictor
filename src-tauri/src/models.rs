@@ -176,6 +176,9 @@ pub struct BetRecommendation {
     /// true のとき est_odds は実オッズではなく推定値
     #[serde(default)]
     pub odds_is_estimated: bool,
+    /// 検証で残った買い方（JRA-VAN モデルで期待値 1.0 以上の単勝）なら true。それ以外は「おすすめしない」
+    #[serde(default)]
+    pub recommended: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

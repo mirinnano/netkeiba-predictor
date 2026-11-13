@@ -137,6 +137,8 @@ export interface BetRecommendation {
   actual_payout_per_100: number | null;
   actual_return: number | null;
   /** true のとき est_odds は実オッズではなく推定値 */
+  /** 検証で残った買い方（JRA-VAN モデルで期待値 1.0 以上の単勝）なら true */
+  recommended?: boolean;
   odds_is_estimated: boolean;
 }
 

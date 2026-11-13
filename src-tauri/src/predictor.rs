@@ -1144,14 +1144,13 @@ pub fn generate_recommendations(
     validated_model: bool,
 ) -> Vec<BetRecommendation> {
     let active: Vec<&HorsePrediction> = preds.iter().filter(|p| !p.entry.is_scratched).collect();
-    // 買い方は検証で残ったルールだけ（docs/BACKTEST.md「買い方の検証結果」）:
-    // JRA-VAN モデルの勝率で、実オッズでの期待値が 1.0 以上の単勝を 100 円ずつ。なければ見送り。
-    // 組み合わせ馬券（馬連・ワイド・3連複）は、期待値で選んでも回収率 67〜79% だったので買わない。
-    // 簡易モデル（JRA-VAN の DB がないとき・地方）は検証していないので買い目を出さない。
-    if active.len() < 3 || !validated_model {
+    // 買い目はこれまでどおり印から組む（期待値に関係なく買う）。
+    // そのうえで、検証で残ったルール（JRA-VAN モデルで、実オッズでの期待値が 1.0 以上の単勝）に当たるものだけを「おすすめ」にする。
+    // ほかの買い目は「おすすめしない」（検証では回収率 82〜84%）。docs/BACKTEST.md「買い方の検証結果」
+    if active.len() < 3 {
         return Vec::new();
     }
-    let _ = (budget, strategy);
+
 
     // モデル勝率（合計 1）と、単勝オッズから逆算した市場の勝率（全頭のオッズがあるときだけ）
     let model_p = harville::normalize(&active.iter().map(|p| p.win_prob).collect::<Vec<_>>());
@@ -1164,6 +1163,15 @@ pub fn generate_recommendations(
     let odds_basis: &[f64] = market_p.as_deref().unwrap_or(&model_p);
     let hm = harville::Model::new(&model_p);
     let hb = harville::Model::new(odds_basis);
+
+    let honmei = 0;
+    let taikou = 1;
+    let tanana = 2;
+    let star = active
+        .iter()
+        .position(|p| p.mark == "☆")
+        .unwrap_or(if active.len() > 3 { 3 } else { tanana });
+    let renka1 = active.iter().position(|p| p.mark == "△").unwrap_or(star);
 
     let mut recs: Vec<BetRecommendation> = Vec::new();
 
@@ -1237,18 +1245,80 @@ pub fn generate_recommendations(
             actual_payout_per_100: None,
             actual_return: None,
             odds_is_estimated: estimated,
+            recommended: false,
         });
     };
 
-    for i in 0..active.len() {
-        let real = active[i].entry.win_odds.filter(|&o| o > 0.0);
-        if let Some(o) = real {
-            if model_p[i] * o >= 1.0 {
-                push("単勝", &[i], "期待値1.0以上", &mut recs);
+    // 1. 単勝 (◎ or ☆ depending on strategy)
+    let tan_target = if strategy == "value_focus"
+        && active[star].expected_value > active[honmei].expected_value
+    {
+        star
+    } else {
+        honmei
+    };
+    let tan_conf = if active[tan_target].mark == "◎" {
+        "本命勝負"
+    } else {
+        "高期待値単勝"
+    };
+    push("単勝", &[tan_target], tan_conf, &mut recs);
+
+    // 2. 馬連 (◎-○, ◎-▲, ◎-☆)
+    push("馬連", &[honmei, taikou], "本線", &mut recs);
+    push("馬連", &[honmei, tanana], "対抗押さえ", &mut recs);
+    push("馬連", &[honmei, star], "妙味狙い", &mut recs);
+
+    // 3. ワイド (◎-○, ◎-☆)
+    push("ワイド", &[honmei, taikou], "鉄板ワイド", &mut recs);
+    push("ワイド", &[honmei, star], "穴ワイド妙味", &mut recs);
+
+    // 4. 3連複 (◎-○-▲, ◎-○-☆, ◎-▲-☆, ◎-○-△)
+    push("3連複", &[honmei, taikou, tanana], "3連複本線", &mut recs);
+    push("3連複", &[honmei, taikou, star], "3連複中穴", &mut recs);
+    push("3連複", &[honmei, tanana, star], "3連複高配当", &mut recs);
+    push("3連複", &[honmei, taikou, renka1], "3連複押さえ", &mut recs);
+
+    // 検証で残ったルールに当たる単勝（期待値 1.0 以上・実オッズ）を足す。おすすめの印を付ける
+    if validated_model {
+        for i in 0..active.len() {
+            if let Some(o) = active[i].entry.win_odds.filter(|&o| o > 0.0) {
+                if model_p[i] * o >= 1.0 {
+                    push("単勝", &[i], "期待値1.0以上", &mut recs);
+                }
             }
         }
     }
     for r in recs.iter_mut() {
+        r.recommended = validated_model && r.bet_type == "単勝" && !r.odds_is_estimated && r.expected_value >= 1.0;
+    }
+
+    // Allocate budget across tickets in 100-yen units according to strategy
+    let clean_budget = (budget / 100) * 100;
+    let scores: Vec<f64> = recs
+        .iter()
+        .map(|r| match strategy {
+            "hit_focus" => r.est_hit_prob.powf(0.85) * 10.0,
+            "value_focus" => r.expected_value.max(0.4).powf(1.4) * (r.est_hit_prob.sqrt()),
+            _ => (r.est_hit_prob * 4.0) + (r.expected_value * 0.8),
+        })
+        .collect();
+    let score_sum: f64 = scores.iter().sum::<f64>().max(1e-6);
+
+    let mut allocated = 0_u32;
+    for (i, r) in recs.iter_mut().enumerate() {
+        let raw_share = (clean_budget as f64) * (scores[i] / score_sum);
+        let rounded = ((raw_share / 100.0).round() as u32 * 100).max(100);
+        if allocated + rounded <= clean_budget {
+            r.suggested_amount = rounded;
+            allocated += rounded;
+        }
+    }
+    if allocated < clean_budget && !recs.is_empty() {
+        recs[0].suggested_amount += clean_budget - allocated;
+    }
+    // おすすめの単勝は、予算の配分で 0 円になっても 100 円は買う（検証した買い方は 1 点 100 円）
+    for r in recs.iter_mut().filter(|r| r.recommended && r.suggested_amount == 0) {
         r.suggested_amount = 100;
     }
 
@@ -1429,8 +1499,12 @@ pub(crate) mod tests {
         assert!((win - 1.0).abs() < 0.01, "勝率の合計 {}", win);
         assert!((top3 - 3.0).abs() < 0.01, "3着内率の合計 {}", top3);
         assert!(r.pre_race);
-        // 簡易モデルは買い方を検証していないので、買い目を出さない
-        assert!(r.recommendations.is_empty());
+        // 単勝は実オッズ、組み合わせは実オッズが無いので推定。簡易モデルなので「おすすめ」はない
+        assert!(r
+            .recommendations
+            .iter()
+            .all(|x| x.odds_is_estimated == (x.bet_type != "単勝")));
+        assert!(r.recommendations.iter().all(|x| !x.recommended));
     }
 
     /// JRA-VAN モデルの勝率を渡したときの予想（勝率は馬番 1..6 の順）
@@ -1454,14 +1528,29 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn only_win_bets_with_ev_at_least_one_are_bought() {
+    fn win_bets_with_ev_at_least_one_are_recommended() {
         // 期待値: 1番 0.30×2.5=0.75, 2番 0.40, 3番 0.60, 4番 1.50, 5番 4.0, 6番 6.0
         let r = jv_prediction(false);
-        let mut got: Vec<u32> = r.recommendations.iter().map(|x| x.horses[0]).collect();
-        got.sort_unstable();
-        assert_eq!(got, vec![4, 5, 6]);
-        assert!(r.recommendations.iter().all(|x| x.bet_type == "単勝" && x.suggested_amount == 100 && !x.odds_is_estimated));
-        assert_eq!(r.total_bet, 300);
+        let mut rec: Vec<u32> = r.recommendations.iter().filter(|x| x.recommended).map(|x| x.horses[0]).collect();
+        rec.sort_unstable();
+        assert_eq!(rec, vec![4, 5, 6]);
+        assert!(r.recommendations.iter().filter(|x| x.recommended).all(|x| x.bet_type == "単勝" && x.suggested_amount >= 100));
+        // ほかの買い目（馬連など）も通常どおり出る
+        assert!(r.recommendations.iter().any(|x| x.bet_type == "馬連" && x.suggested_amount > 0 && !x.recommended));
+    }
+
+    #[test]
+    fn real_combo_odds_are_used_when_available() {
+        let mut combo = ComboOdds::default();
+        combo.umaren.insert("1-2".into(), 7.7);
+        let r = run_prediction(race_info(false), field(), vec![], ScoringWeights::default(), 3000, "balance".into(), String::new(), combo);
+        let umaren = r
+            .recommendations
+            .iter()
+            .find(|x| x.bet_type == "馬連" && x.horses == vec![1, 2])
+            .expect("◎-○ の馬連がある");
+        assert_eq!(umaren.est_odds, 7.7);
+        assert!(!umaren.odds_is_estimated);
     }
 
     #[test]
@@ -1477,6 +1566,28 @@ pub(crate) mod tests {
             ComboOdds::default(),
         );
         assert!(!r.pre_race);
+    }
+
+    #[test]
+    fn without_ev_one_tickets_are_still_bought_but_not_recommended() {
+        // オッズを 0.8 倍にして控除率を作り、勝率は市場どおりにする → 全頭の期待値は 1.0 未満
+        let mut f = field();
+        for e in f.iter_mut() {
+            e.win_odds = e.win_odds.map(|o| o * 0.8);
+        }
+        let inv: Vec<f64> = f.iter().map(|e| 1.0 / e.win_odds.unwrap()).collect();
+        let s: f64 = inv.iter().sum();
+        // 3番だけ少し高く見積もる（期待値が最大になる馬）
+        let mut probs: Vec<f64> = inv.iter().map(|x| x / s).collect();
+        probs[2] *= 1.1;
+        let t: f64 = probs.iter().sum();
+        let jv = crate::models::JvModelOut {
+            probs: probs.iter().enumerate().map(|(i, p)| (i as u32 + 1, p / t)).collect(),
+            contrib: std::collections::HashMap::new(),
+        };
+        let r = run_prediction_with(race_info(false), f, vec![], ScoringWeights::default(), 3000, "balance".into(), String::new(), ComboOdds::default(), Some(&jv));
+        assert!(r.recommendations.iter().any(|x| x.suggested_amount > 0), "期待値に関係なく買い目は出る");
+        assert!(r.recommendations.iter().all(|x| !x.recommended), "期待値 1.0 以上がないので、おすすめはない");
     }
 
     #[test]
