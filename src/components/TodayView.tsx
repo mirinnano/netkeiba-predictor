@@ -12,6 +12,8 @@ export function TodayView({ onPickRace, onOpenBrowser }: { onPickRace: (raceId: 
   const [venues, setVenues] = useState<VenueRaces[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => new Date());
+  const [venue, setVenue] = useState<string | null>(null);
+  const [showDone, setShowDone] = useState(false);
 
   useEffect(() => {
     invoke<VenueRaces[]>("get_race_list_by_date", { kaisaiDate: ymd(new Date()), isNar: false })
@@ -36,6 +38,7 @@ export function TodayView({ onPickRace, onOpenBrowser }: { onPickRace: (raceId: 
   }, [venues]);
 
   const nextIdx = rows.findIndex((r) => r.at.getTime() > now.getTime());
+  const venueNames = useMemo(() => (venues ?? []).map((v) => v.short_venue || v.venue_name), [venues]);
 
   if (error) {
     return <p className="text-[13px] text-ink-muted">今日のレースを取得できませんでした（{error}）</p>;
@@ -64,7 +67,10 @@ export function TodayView({ onPickRace, onOpenBrowser }: { onPickRace: (raceId: 
     );
   }
 
-  const next = nextIdx >= 0 ? rows[nextIdx] : null;
+  const inVenue = rows.map((r, i) => ({ r, i })).filter(({ r }) => !venue || r.venue === venue);
+  const next = nextIdx >= 0 ? (inVenue.find(({ i }) => i >= nextIdx)?.r ?? null) : null;
+  const doneCount = inVenue.filter(({ i }) => nextIdx === -1 || i < nextIdx).length;
+  const shown = showDone ? inVenue : inVenue.filter(({ i }) => !(nextIdx === -1 || i < nextIdx));
   const mins = next ? Math.max(0, Math.round((next.at.getTime() - now.getTime()) / 60000)) : null;
 
   return (
@@ -111,8 +117,36 @@ export function TodayView({ onPickRace, onOpenBrowser }: { onPickRace: (raceId: 
         </button>
       )}
 
+      {venueNames.length > 1 && (
+        <div className="flex gap-1.5" role="group" aria-label="競馬場で絞る">
+          {[null, ...venueNames].map((v) => (
+            <button
+              key={v ?? "all"}
+              type="button"
+              aria-pressed={venue === v}
+              onClick={() => setVenue(v)}
+              className={`h-9 rounded-full border px-4 text-[13px] font-bold transition-colors ${
+                venue === v ? "border-ink bg-ink text-white" : "border-line bg-paper text-ink-soft"
+              }`}
+            >
+              {v ?? "すべて"}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {doneCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowDone((s) => !s)}
+          className="w-full text-left text-[12px] font-bold text-ink-muted"
+        >
+          {showDone ? "発走済みのレースを隠す" : `発走済み ${doneCount} レースを表示`}
+        </button>
+      )}
+
       <ul className="divide-y divide-line-soft border-y border-ink">
-        {rows.map((r, i) => {
+        {shown.map(({ r, i }) => {
           const done = nextIdx === -1 || i < nextIdx;
           return (
             <li key={r.race_id}>

@@ -372,7 +372,9 @@ export default function App() {
             {TABS.map((t) => renderTab(t, false))}
           </nav>
           <form
-            className="ml-auto flex w-[460px] max-w-[45%] items-center gap-2 max-md:ml-0 max-md:w-full max-md:max-w-none"
+            className={`ml-auto flex w-[460px] max-w-[45%] items-center gap-2 max-md:ml-0 max-md:w-full max-md:max-w-none ${
+              tab === "today" || tab === "browser" ? "" : "max-md:hidden"
+            }`}
             onSubmit={(e) => {
               e.preventDefault();
               analyze();
