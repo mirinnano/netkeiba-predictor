@@ -75,6 +75,12 @@ fn main() {
             if st.len() < 5 || st.iter().any(|h| h.win_odds.is_none()) || !st.iter().any(|h| h.rank == Some(1)) {
                 continue;
             }
+            // 当日の馬場の偏り: 同じ場・同じ馬場で、このレースより前（R が小さい）の確定レース
+            let earlier: Vec<&JvRace> = today
+                .iter()
+                .filter(|e| e.venue_code == r.venue_code && e.surface == r.surface && e.race_id[10..12] < r.race_id[10..12])
+                .collect();
+            engine.set_day_bias(netkeiba_predictor_lib::jvmodel::day_bias(&earlier));
             let card = card_from_jv(r);
             for h in &card.runners {
                 coverage.0 += 1;
@@ -262,6 +268,7 @@ fn load_bet_data(dir: &std::path::Path) -> (HashMap<String, HashMap<(String, Vec
             }
         };
         put("単勝", 103, 13, 3, 1);
+        put("複勝", 142, 13, 5, 1);
         put("馬連", 246, 16, 3, 2);
         put("ワイド", 294, 16, 7, 2);
         put("3連複", 550, 18, 3, 3);
@@ -297,6 +304,27 @@ fn load_bet_data(dir: &std::path::Path) -> (HashMap<String, HashMap<(String, Vec
         }
     }
     (pay.into_iter().map(|(k, (_, m))| (k, m)).collect(), odds)
+}
+
+/// O1 の複勝オッズの下限（レース → 馬番 → 下限オッズ）。複勝は 268 バイト目から 12×28（馬番2 下限4 上限4 人気2）。オッズは 10 倍の整数
+fn load_place_odds(dir: &std::path::Path) -> HashMap<String, HashMap<u32, f64>> {
+    let mut m: HashMap<String, HashMap<u32, f64>> = HashMap::new();
+    for l in std::fs::read(dir.join("O1.txt")).unwrap_or_default().split(|&c| c == b'\n') {
+        let b = l.strip_suffix(b"\r").unwrap_or(l);
+        if b.len() < 603 {
+            continue;
+        }
+        let e = m.entry(rec_race_id(b)).or_default();
+        for i in 0..28 {
+            let p = 268 + 12 * i;
+            if let (Some(h), Some(o)) = (num(b, p, 2), num(b, p + 2, 4)) {
+                if h > 0 && o > 0 {
+                    e.insert(h as u32, o as f64 / 10.0);
+                }
+            }
+        }
+    }
+    m
 }
 
 /// アプリと同じ買い目（予算 3000 円）を、検証区間の各レースで作り、公式の払戻で精算する。
@@ -389,7 +417,7 @@ fn bets(data: &[(String, Vec<Runner>)], classes: &[f64], race_ids: &[String], db
 
 // ---- 買い方の検証（docs/BACKTEST.md「買い方の検証計画」のとおり） ----
 
-const BET_TYPES: [&str; 4] = ["単勝", "馬連", "ワイド", "3連複"];
+const BET_TYPES: [&str; 5] = ["単勝", "馬連", "ワイド", "3連複", "複勝"];
 const THRESHOLDS: [f64; 4] = [1.0, 1.1, 1.2, 1.3];
 
 /// 期待値 1.0 以上の候補 1 点: (年, レース番号, クラス区分, 券種, 期待値, 100円あたり払戻)
@@ -399,10 +427,12 @@ fn plan(data: &[(String, Vec<Runner>)], classes: &[f64], race_ids: &[String], di
     use netkeiba_predictor_lib::predictor::harville;
     let mut pay: HashMap<String, HashMap<(String, Vec<u32>), u64>> = HashMap::new();
     let mut odds: HashMap<String, netkeiba_predictor_lib::models::ComboOdds> = HashMap::new();
+    let mut place: HashMap<String, HashMap<u32, f64>> = HashMap::new();
     for d in dirs {
         let (p, o) = load_bet_data(d);
         pay.extend(p);
         odds.extend(o);
+        place.extend(load_place_odds(d));
     }
     println!("払戻 {} レース / オッズ {} レース", pay.len(), odds.len());
     let cols: Vec<usize> = ADOPTED.to_vec();
@@ -443,6 +473,14 @@ fn plan(data: &[(String, Vec<Runner>)], classes: &[f64], race_ids: &[String], di
                     }
                 }
             };
+            // 複勝: 8 頭以上は 3 着内、6〜7 頭は 2 着内（5 頭以下は発売なし）
+            if n >= 6 {
+                let top = if n >= 8 { h.top3() } else { (0..n).map(|i| p[i] + (0..n).filter(|&j| j != i).map(|j| h.exacta(j, i)).sum::<f64>()).collect() };
+                let pm = place.get(id);
+                for a in 0..n {
+                    add(4, top[a].min(1.0), pm.and_then(|m| m.get(&race[a].umaban)).copied(), vec![race[a].umaban]);
+                }
+            }
             for a in 0..n {
                 add(0, p[a], Some(race[a].odds), vec![race[a].umaban]);
                 for c in a + 1..n {
@@ -462,8 +500,8 @@ fn plan(data: &[(String, Vec<Runner>)], classes: &[f64], race_ids: &[String], di
 
     // 1) 較正（選ぶ期間）。上位（確率の高い）区分で、予測と実際が 2 割以上ずれていないか
     println!("\n[較正: 予測した的中確率と実際の的中率（選ぶ期間）]");
-    let mut calib_ok = [true; 4];
-    for t in 0..4 {
+    let mut calib_ok = [true; 5];
+    for t in 0..5 {
         let mut line = format!("  {:<4}", BET_TYPES[t]);
         let bins: Vec<usize> = (0..10).filter(|b| calib.get(&(t, 0, *b)).map(|e| e.2 >= 200.0).unwrap_or(false)).collect();
         for &b in &bins {
@@ -502,8 +540,8 @@ fn plan(data: &[(String, Vec<Runner>)], classes: &[f64], race_ids: &[String], di
         (r / b.max(1.0) * 100.0, bs[50], bs[1949], rs.len())
     };
     println!("\n[ルールを選ぶ（2016〜2021 年）]");
-    let mut rule: [Option<f64>; 4] = [None; 4];
-    for t in 0..4 {
+    let mut rule: [Option<f64>; 5] = [None; 5];
+    for t in 0..5 {
         let mut best: Option<(f64, f64, f64)> = None;
         for th in THRESHOLDS {
             let v: Vec<&Cand> = cands.iter().filter(|c| c.0 <= 2021 && c.3 == t && c.4 >= th).collect();
@@ -532,7 +570,7 @@ fn plan(data: &[(String, Vec<Runner>)], classes: &[f64], race_ids: &[String], di
     let hits = chosen.iter().filter(|c| c.5 > 0.0).count();
     println!("  全体: {} 点 / 買ったレース {}（全 {} レースの {:.0}%）/ 的中 {:.1}% / 回収率 {:.1}% [{:.0}%, {:.0}%]",
         chosen.len(), nr, races_in[1], nr as f64 / races_in[1].max(1) as f64 * 100.0, hits as f64 / chosen.len() as f64 * 100.0, roi, lo, hi);
-    for t in 0..4 {
+    for t in 0..5 {
         let v: Vec<&Cand> = chosen.iter().copied().filter(|c| c.3 == t).collect();
         if v.is_empty() { continue; }
         let (roi, lo, hi, nr) = race_ci(&v);
@@ -681,6 +719,7 @@ fn evaluate(data: &[(String, Vec<Runner>)], classes: &[f64]) {
         ("市場+全特徴量".into(), true, (0..38).collect()),
         ("市場+全特徴量+調教詳細".into(), true, (0..43).collect()),
         ("市場+全特徴量+血統".into(), true, (0..38).chain(43..47).collect()),
+        ("市場+全特徴量+当日".into(), true, (0..38).chain(47..49).collect()),
     ];
     for (g, cols) in GROUPS {
         variants.push((format!("市場+{}", g), true, cols.to_vec()));
@@ -753,6 +792,8 @@ fn evaluate(data: &[(String, Vec<Runner>)], classes: &[f64]) {
         // pooled[0]=市場, [1]=市場(γ補正), [2]=モデルのみ, [3]=市場+全特徴量, [4]=+調教詳細
         let (m, lo, hi) = paired_ci(&pooled[4], &pooled[3]);
         println!("  調教詳細の上積み = (+調教詳細) − 全特徴量: {:+.4} [{:+.4}, {:+.4}]{}", m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
+        let (m, lo, hi) = paired_ci(&pooled[6], &pooled[3]);
+        println!("  当日の馬場の偏りの上積み = (+当日) − 全特徴量: {:+.4} [{:+.4}, {:+.4}]{}", m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
         let (m, lo, hi) = paired_ci(&pooled[5], &pooled[3]);
         println!("  血統の上積み = (+血統) − 全特徴量: {:+.4} [{:+.4}, {:+.4}]{}", m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
     }

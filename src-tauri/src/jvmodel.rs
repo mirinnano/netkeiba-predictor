@@ -8,7 +8,7 @@ use crate::jvdata::{JvRace, JvRunner, JvWork};
 use chrono::Datelike;
 use std::collections::HashMap;
 
-pub const NAMES: [&str; 47] = [
+pub const NAMES: [&str; 49] = [
     "指数最高3", "指数平均3", "指数前走", "上がり順位", "展開不利", "4角から挽回", "着差", "着順率", "過去人気",
     "人気以上", "クラス変化", "騎手3着内", "調教師3着内", "騎手勝率", "間隔", "距離変更", "芝ダ替わり", "斤量差",
     "馬体重増減", "馬体重", "馬齢", "出走数", "ブリンカー", "初ブリンカー", "馬番位置", "脚質", "同場3着内", "同距離3着内",
@@ -16,6 +16,7 @@ pub const NAMES: [&str; 47] = [
     "坂路4F", "坂路ラスト1F", "坂路本数", "ウッド4F", "ウッドラスト1F", "ウッド本数", "最終追切からの日数", "最終追切ラスト1F",
     "最終追切の加速", "自己比ラスト1F", "併せ馬", "28日本数", "最終が坂路",
     "父の同条件", "母父の同条件", "父の馬場適性", "父×未経験条件",
+    "当日の内外×馬番", "当日の前後×脚質",
 ];
 
 /// 採用している特徴量（調教の詳細 38〜42 は検証で悪化したので使わない）
@@ -178,6 +179,35 @@ pub struct Engine {
     pedigree: HashMap<String, (String, String)>,
     /// 父・母父ごとの産駒成績。キーは (種牡馬, 馬場, 距離帯)。馬場・距離帯が空のものは全体
     sire_stat: HashMap<(String, String, u8), Stat>,
+    /// 当日の馬場の偏り（内外, 前後）。同じ日・同じ場・同じ馬場で先に終わったレースから作る。分からなければ NaN
+    day_bias: (f64, f64),
+}
+
+/// 当日の馬場の偏り。先に終わったレース（2 つ以上）の結果から
+/// 内外 = 内 1/3 の平均着順率 − 外 1/3 の平均着順率、前後 = 4 角で前 1/3 の平均着順率 − 後ろ 1/3 の平均着順率（負なら内・前が有利）
+pub fn day_bias(earlier: &[&JvRace]) -> (f64, f64) {
+    if earlier.len() < 2 {
+        return (f64::NAN, f64::NAN);
+    }
+    let (mut ins, mut outs, mut fr, mut bk) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for r in earlier {
+        let st: Vec<&JvRunner> = r.runners.iter().filter(|h| started(h) && h.rank.is_some()).collect();
+        let n = st.len() as f64;
+        if n < 5.0 {
+            continue;
+        }
+        for h in &st {
+            let fin = (h.rank.unwrap() as f64 - 1.0) / (n - 1.0);
+            let draw = h.umaban as f64 / n;
+            if draw <= 1.0 / 3.0 { ins.push(fin) } else if draw > 2.0 / 3.0 { outs.push(fin) }
+            if let Some(c) = h.corners[3] {
+                let q = c as f64 / n;
+                if q <= 1.0 / 3.0 { fr.push(fin) } else if q > 2.0 / 3.0 { bk.push(fin) }
+            }
+        }
+    }
+    let mean = |v: &Vec<f64>| if v.is_empty() { f64::NAN } else { v.iter().sum::<f64>() / v.len() as f64 };
+    (mean(&ins) - mean(&outs), mean(&fr) - mean(&bk))
 }
 
 /// 距離帯: 〜1400 / 〜1800 / 〜2200 / それ以上
@@ -271,7 +301,7 @@ impl Engine {
             .filter(|(_, (a, b))| a.len() >= 100 && b.len() >= 100)
             .map(|(k, (mut a, mut b))| (k, (median(&mut a), median(&mut b))))
             .collect();
-        Engine { hist: HashMap::new(), jockey: HashMap::new(), trainer: HashMap::new(), works: wm, std_t, going_adj, pace_std, work_std, pedigree: HashMap::new(), sire_stat: HashMap::new() }
+        Engine { hist: HashMap::new(), jockey: HashMap::new(), trainer: HashMap::new(), works: wm, std_t, going_adj, pace_std, work_std, pedigree: HashMap::new(), sire_stat: HashMap::new(), day_bias: (f64::NAN, f64::NAN) }
     }
 
     pub fn summary(&self) -> String {
@@ -288,6 +318,11 @@ impl Engine {
     /// 血統を設定する（馬 → (父, 母父)）。履歴を足す前に呼ぶ
     pub fn set_pedigree(&mut self, pedigree: HashMap<String, (String, String)>) {
         self.pedigree = pedigree;
+    }
+
+    /// 当日の馬場の偏りを設定する（次に作る出馬表の特徴量に使う）。分からなければ (NaN, NaN)
+    pub fn set_day_bias(&mut self, b: (f64, f64)) {
+        self.day_bias = b;
     }
 
     /// その馬に過去走があるか
@@ -486,6 +521,10 @@ impl Engine {
                     }
                     None => row.extend([f64::NAN; 4]),
                 }
+                // 当日の馬場の偏り × この馬の位置（馬番位置、過去 3 走の 4 角位置）
+                row.push(self.day_bias.0 * (h.umaban as f64 / n - 0.5));
+                let pos = avg(&|r| r.pos4);
+                row.push(self.day_bias.1 * (pos - 0.5));
                 row
             })
             .collect()
