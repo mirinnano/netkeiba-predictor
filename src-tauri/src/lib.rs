@@ -144,6 +144,64 @@ fn jv_status(app: tauri::AppHandle) -> jvapp::JvStatus {
     jvapp::status(db.as_deref())
 }
 
+/// 締め切り前などに、オッズだけを取り直して勝率・期待値・買い目を作り直す（出馬表と過去走は取り直さない）。
+/// JRA-VAN モデルの勝率は単勝オッズを使うので、計算し直す（Engine は使い回すので速い）
+#[tauri::command]
+async fn refresh_odds(
+    app: tauri::AppHandle,
+    current_result: RacePredictionResult,
+    budget: u32,
+    strategy: String,
+    memo: Option<String>,
+) -> Result<RacePredictionResult, String> {
+    let info = current_result.race_info.clone();
+    let mut entries: Vec<HorseEntry> = current_result.predictions.iter().map(|p| p.entry.clone()).collect();
+    let client = scraper::build_client()?;
+    let odds = scraper::fetch_jra_odds(&client, &info.race_id).await;
+    if odds.is_empty() {
+        return Err("オッズを取れませんでした（発売前か、通信できません）".into());
+    }
+    for e in entries.iter_mut() {
+        if let Some((w, pmin, pmax, pop)) = odds.get(&e.umaban) {
+            if w.is_some() {
+                e.win_odds = *w;
+            }
+            e.place_odds_min = pmin.or(e.place_odds_min);
+            e.place_odds_max = pmax.or(e.place_odds_max);
+            if pop.is_some() {
+                e.popularity = *pop;
+            }
+        }
+    }
+    let combo = scraper::fetch_jra_combo_odds(&client, &info.race_id).await;
+    let db = app.path().app_data_dir().ok().and_then(|d| jvapp::db_path(&d));
+    let jv = match db {
+        Some(p) => {
+            let live = same_day_results(&p, &info.race_id).await;
+            let (i2, e2) = (info.clone(), entries.clone());
+            tokio::task::spawn_blocking(move || jvapp::jv_probs(&p, &i2, &e2, &live))
+                .await
+                .map_err(|e| e.to_string())?
+                .unwrap_or(None)
+        }
+        None => None,
+    };
+    let pre_race = current_result.pre_race && !info.is_finished;
+    let mut updated = predictor::run_prediction_with(
+        info,
+        entries,
+        current_result.official_payouts,
+        current_result.weights,
+        budget,
+        strategy,
+        memo.unwrap_or(current_result.memo),
+        combo,
+        jv.as_ref(),
+    );
+    updated.pre_race = pre_race;
+    Ok(updated)
+}
+
 #[tauri::command]
 fn recalculate_prediction(
     current_result: RacePredictionResult,
@@ -255,6 +313,7 @@ pub fn run() {
             get_race_list_by_date,
             analyze_race,
             recalculate_prediction,
+            refresh_odds,
             save_prediction_record,
             load_prediction_record,
             delete_prediction_record,

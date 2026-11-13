@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import { BarChart3, RefreshCw } from "lucide-react";
+import { BarChart3, RefreshCw, TrendingUp } from "lucide-react";
 import { RacePredictionResult } from "../types";
-import { byPredictedOrder, pct, surfaceLabel, ticketHorses } from "../lib/format";
+import { byPredictedOrder, hhmm, pct, surfaceLabel, ticketHorses } from "../lib/format";
 import { CapStrip } from "./CapStrip";
 import { Cloth } from "./Cloth";
 import { EntryTable } from "./EntryTable";
@@ -16,6 +16,11 @@ export function RaceView({
   onStrategy,
   onSave,
   onRefresh,
+  onRefreshOdds,
+  refreshing,
+  oddsAt,
+  minutesToPost,
+  autoRefresh,
   busy,
   memo,
   onMemo,
@@ -27,6 +32,11 @@ export function RaceView({
   onStrategy: (s: string) => void;
   onSave: () => void;
   onRefresh: () => void;
+  onRefreshOdds: () => void;
+  refreshing: boolean;
+  oddsAt: Date | null;
+  minutesToPost: number | null;
+  autoRefresh: boolean;
   busy: boolean;
   memo: string;
   onMemo: (m: string) => void;
@@ -120,6 +130,32 @@ export function RaceView({
           </button>
         </div>
       </div>
+
+      {/* オッズの鮮度。期待値とおすすめはオッズで変わるので、いつのオッズかを常に見せる */}
+      {!info.is_finished && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-line bg-paper px-3 py-2">
+          <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 gap-y-0.5 text-[12px]">
+            <span className="text-ink-muted">
+              オッズ <span className="num text-[15px] font-bold text-ink">{oddsAt ? hhmm(oddsAt) : "-"}</span> 時点
+            </span>
+            {minutesToPost !== null && minutesToPost >= 0 && minutesToPost <= 180 && (
+              <span className="text-ink-muted">
+                発走まで <span className="num text-[15px] font-bold text-ink">{minutesToPost}</span> 分
+              </span>
+            )}
+            {autoRefresh && <span className="font-bold text-shell">発走20分前から2分ごとに自動更新</span>}
+          </div>
+          <button
+            type="button"
+            onClick={onRefreshOdds}
+            disabled={refreshing || busy}
+            className="flex h-9 items-center gap-1.5 rounded-md bg-shell px-3 text-[13px] font-bold text-white hover:bg-shell-deep disabled:opacity-60 max-md:h-11 max-md:px-4"
+          >
+            {refreshing ? <RefreshCw className="h-4 w-4 animate-spin" /> : <TrendingUp className="h-4 w-4" />}
+            オッズ更新
+          </button>
+        </div>
+      )}
 
       {/* 予想順のゼッケン列 */}
       <CapStrip

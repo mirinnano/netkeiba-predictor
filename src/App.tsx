@@ -15,11 +15,14 @@ import { BetsView } from "./components/BetsView";
 import { BrowserView } from "./components/BrowserView";
 import { HistoryView } from "./components/HistoryView";
 import { DEFAULT_WEIGHTS } from "./components/WeightsPanel";
+import { postTime, recommendedKey } from "./lib/format";
 import { JvDataPanel } from "./components/JvDataPanel";
+import { TodayView } from "./components/TodayView";
 
-type Tab = "race" | "browser" | "bets" | "history";
+type Tab = "today" | "race" | "browser" | "bets" | "history";
 
 const TABS: { id: Tab; label: string }[] = [
+  { id: "today", label: "今日" },
   { id: "race", label: "出馬表" },
   { id: "browser", label: "開催一覧" },
   { id: "bets", label: "買い目" },
@@ -27,7 +30,7 @@ const TABS: { id: Tab; label: string }[] = [
 ];
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("browser");
+  const [tab, setTab] = useState<Tab>("today");
   const [raceInput, setRaceInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [busyText, setBusyText] = useState("");
@@ -51,6 +54,11 @@ export default function App() {
 
   // 再計算は連続で呼ばれるので、最後に投げたものだけを反映する
   const recalcSeq = useRef(0);
+
+  // オッズを最後に取った時刻と、取り直し中か
+  const [oddsAt, setOddsAt] = useState<Date | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [now, setNow] = useState(() => new Date());
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -135,6 +143,7 @@ export default function App() {
       const res = await invoke<RacePredictionResult>("analyze_race", { input: q, weights, budget, strategy });
       setPrediction(res);
       setMemo(res.memo || "");
+      setOddsAt(new Date());
       setTab("race");
     } catch (e) {
       setError(String(e));
@@ -143,6 +152,47 @@ export default function App() {
       setBusyText("");
     }
   };
+
+  /** オッズだけ取り直して、期待値とおすすめを作り直す。おすすめが変わったら知らせる */
+  const refreshOdds = async (auto = false) => {
+    if (!prediction || refreshing || busy) return;
+    setRefreshing(true);
+    try {
+      const before = recommendedKey(prediction);
+      const updated = await invoke<RacePredictionResult>("refresh_odds", {
+        currentResult: prediction,
+        budget,
+        strategy,
+        memo,
+      });
+      setPrediction(updated);
+      setOddsAt(new Date());
+      const after = recommendedKey(updated);
+      if (before !== after) {
+        showToast(after ? `おすすめが変わりました：単勝 ${after.replace(/,/g, "・")}` : "おすすめの単勝がなくなりました");
+      } else if (!auto) {
+        showToast("オッズを更新しました");
+      }
+    } catch (e) {
+      if (!auto) setError(String(e));
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // 発走 20 分前から、2 分ごとにオッズを自動で取り直す（出馬表を開いているときだけ）
+  const post = prediction ? postTime(prediction.race_info.date_str, prediction.race_info.start_time) : null;
+  const minutesToPost = post ? Math.round((post.getTime() - now.getTime()) / 60000) : null;
+  const autoRefresh = !!prediction && !prediction.race_info.is_finished && minutesToPost !== null && minutesToPost <= 20 && minutesToPost >= -2;
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 30000);
+    return () => window.clearInterval(id);
+  }, []);
+  useEffect(() => {
+    if (!autoRefresh || tab !== "race" || !oddsAt) return;
+    if (now.getTime() - oddsAt.getTime() >= 120000) refreshOdds(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [now, autoRefresh, tab]);
 
   const recalc = async (w: ScoringWeights, b: number, s: string) => {
     if (!prediction) return;
@@ -337,12 +387,18 @@ export default function App() {
             }}
             onSave={save}
             onRefresh={() => analyze(prediction.race_info.race_id)}
+            onRefreshOdds={() => refreshOdds(false)}
+            refreshing={refreshing}
+            oddsAt={oddsAt}
+            minutesToPost={minutesToPost}
+            autoRefresh={autoRefresh}
             busy={busy}
             memo={memo}
             onMemo={setMemo}
           />
         )}
         {tab === "bets" && prediction && <BetsView result={prediction} />}
+        {tab === "today" && <TodayView onPickRace={(id) => analyze(id)} onOpenBrowser={() => setTab("browser")} />}
         {tab === "browser" && (
           <BrowserView
             isNar={isNar}

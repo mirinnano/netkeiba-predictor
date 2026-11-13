@@ -44,3 +44,21 @@ export function runningStyle(s: string): string {
   for (const k of Object.keys(STYLE_LABEL)) if (s.includes(k)) return STYLE_LABEL[k];
   return s || "-";
 }
+
+/** "2026年11月15日" と "15:40" から発走時刻（ローカル時刻）。読めなければ null */
+export function postTime(dateStr: string, start: string): Date | null {
+  const d = dateStr.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+  const t = start.match(/(\d{1,2}):(\d{2})/);
+  if (!d || !t) return null;
+  return new Date(+d[1], +d[2] - 1, +d[3], +t[1], +t[2]);
+}
+
+/** おすすめ（期待値 1.0 以上の単勝）の馬番。比較用に並べた文字列 */
+export const recommendedKey = (r: RacePredictionResult) =>
+  r.recommendations
+    .filter((t) => t.recommended && t.suggested_amount > 0)
+    .map((t) => t.horses.join("-"))
+    .sort()
+    .join(",");
+
+export const hhmm = (d: Date) => `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
