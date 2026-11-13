@@ -240,13 +240,21 @@ impl Engine {
                 *slots.entry((w.slope, w.center, w.course, w.date, w.time)).or_default() += 1;
             }
         }
-        let work_first = wm.values().flat_map(|v| v.iter().map(|w| w.date / 10000)).min().unwrap_or(2021);
-        let work_cut = (work_first + 1) * 10000 + 101;
+        // 調教の基準は、種類（坂路・ウッドとトレセン・コース）ごとに、レースの基準年以降で最初にデータがある年の分だけで作る
+        // （ウッドは 2021年7月からしかないので、2011年から読んでもウッドの基準は 2021年になる）
+        let race_first: u32 = first_year.parse().unwrap_or(2021);
+        let mut key_first: HashMap<(bool, u8, u8), u32> = HashMap::new();
+        for v in wm.values() {
+            for w in v.iter().filter(|w| w.date / 10000 >= race_first) {
+                let e = key_first.entry(work_key(w)).or_insert(w.date / 10000);
+                *e = (*e).min(w.date / 10000);
+            }
+        }
         let mut wv: HashMap<(bool, u8, u8), (Vec<f64>, Vec<f64>)> = HashMap::new();
         for v in wm.values_mut() {
             for w in v.iter_mut() {
                 w.partners = slots.get(&(w.slope, w.center, w.course, w.date, w.time)).copied().unwrap_or(1) - 1;
-                if w.date < work_cut {
+                if key_first.get(&work_key(w)).map(|y| w.date / 10000 == *y).unwrap_or(false) {
                     let e = wv.entry(work_key(w)).or_default();
                     if let Some(t) = w.t4 {
                         e.0.push(t);

@@ -683,6 +683,7 @@ pub fn run_prediction_with(
         &official_payouts,
         race_info.is_finished,
         &combo_odds,
+        jv.is_some(),
     );
 
     let total_bet: u32 = recommendations.iter().map(|r| r.suggested_amount).sum();
@@ -1140,11 +1141,17 @@ pub fn generate_recommendations(
     official_payouts: &[OfficialPayoutItem],
     is_finished: bool,
     combo_odds: &ComboOdds,
+    validated_model: bool,
 ) -> Vec<BetRecommendation> {
     let active: Vec<&HorsePrediction> = preds.iter().filter(|p| !p.entry.is_scratched).collect();
-    if active.len() < 3 {
+    // 買い方は検証で残ったルールだけ（docs/BACKTEST.md「買い方の検証結果」）:
+    // JRA-VAN モデルの勝率で、実オッズでの期待値が 1.0 以上の単勝を 100 円ずつ。なければ見送り。
+    // 組み合わせ馬券（馬連・ワイド・3連複）は、期待値で選んでも回収率 67〜79% だったので買わない。
+    // 簡易モデル（JRA-VAN の DB がないとき・地方）は検証していないので買い目を出さない。
+    if active.len() < 3 || !validated_model {
         return Vec::new();
     }
+    let _ = (budget, strategy);
 
     // モデル勝率（合計 1）と、単勝オッズから逆算した市場の勝率（全頭のオッズがあるときだけ）
     let model_p = harville::normalize(&active.iter().map(|p| p.win_prob).collect::<Vec<_>>());
@@ -1157,15 +1164,6 @@ pub fn generate_recommendations(
     let odds_basis: &[f64] = market_p.as_deref().unwrap_or(&model_p);
     let hm = harville::Model::new(&model_p);
     let hb = harville::Model::new(odds_basis);
-
-    let honmei = 0;
-    let taikou = 1;
-    let tanana = 2;
-    let star = active
-        .iter()
-        .position(|p| p.mark == "☆")
-        .unwrap_or(if active.len() > 3 { 3 } else { tanana });
-    let renka1 = active.iter().position(|p| p.mark == "△").unwrap_or(star);
 
     let mut recs: Vec<BetRecommendation> = Vec::new();
 
@@ -1242,59 +1240,16 @@ pub fn generate_recommendations(
         });
     };
 
-    // 1. 単勝 (◎ or ☆ depending on strategy)
-    let tan_target = if strategy == "value_focus"
-        && active[star].expected_value > active[honmei].expected_value
-    {
-        star
-    } else {
-        honmei
-    };
-    let tan_conf = if active[tan_target].mark == "◎" {
-        "本命勝負"
-    } else {
-        "高期待値単勝"
-    };
-    push("単勝", &[tan_target], tan_conf, &mut recs);
-
-    // 2. 馬連 (◎-○, ◎-▲, ◎-☆)
-    push("馬連", &[honmei, taikou], "本線", &mut recs);
-    push("馬連", &[honmei, tanana], "対抗押さえ", &mut recs);
-    push("馬連", &[honmei, star], "妙味狙い", &mut recs);
-
-    // 3. ワイド (◎-○, ◎-☆)
-    push("ワイド", &[honmei, taikou], "鉄板ワイド", &mut recs);
-    push("ワイド", &[honmei, star], "穴ワイド妙味", &mut recs);
-
-    // 4. 3連複 (◎-○-▲, ◎-○-☆, ◎-▲-☆, ◎-○-△)
-    push("3連複", &[honmei, taikou, tanana], "3連複本線", &mut recs);
-    push("3連複", &[honmei, taikou, star], "3連複中穴", &mut recs);
-    push("3連複", &[honmei, tanana, star], "3連複高配当", &mut recs);
-    push("3連複", &[honmei, taikou, renka1], "3連複押さえ", &mut recs);
-
-    // Allocate budget across tickets in 100-yen units according to strategy
-    let clean_budget = (budget / 100) * 100;
-    let scores: Vec<f64> = recs
-        .iter()
-        .map(|r| match strategy {
-            "hit_focus" => r.est_hit_prob.powf(0.85) * 10.0,
-            "value_focus" => r.expected_value.max(0.4).powf(1.4) * (r.est_hit_prob.sqrt()),
-            _ => (r.est_hit_prob * 4.0) + (r.expected_value * 0.8),
-        })
-        .collect();
-    let score_sum: f64 = scores.iter().sum::<f64>().max(1e-6);
-
-    let mut allocated = 0_u32;
-    for (i, r) in recs.iter_mut().enumerate() {
-        let raw_share = (clean_budget as f64) * (scores[i] / score_sum);
-        let rounded = ((raw_share / 100.0).round() as u32 * 100).max(100);
-        if allocated + rounded <= clean_budget {
-            r.suggested_amount = rounded;
-            allocated += rounded;
+    for i in 0..active.len() {
+        let real = active[i].entry.win_odds.filter(|&o| o > 0.0);
+        if let Some(o) = real {
+            if model_p[i] * o >= 1.0 {
+                push("単勝", &[i], "期待値1.0以上", &mut recs);
+            }
         }
     }
-    if allocated < clean_budget && !recs.is_empty() {
-        recs[0].suggested_amount += clean_budget - allocated;
+    for r in recs.iter_mut() {
+        r.suggested_amount = 100;
     }
 
     // Verify against official payouts if finished
@@ -1474,34 +1429,39 @@ pub(crate) mod tests {
         assert!((win - 1.0).abs() < 0.01, "勝率の合計 {}", win);
         assert!((top3 - 3.0).abs() < 0.01, "3着内率の合計 {}", top3);
         assert!(r.pre_race);
-        // 単勝は実オッズ、組み合わせは実オッズが無いので推定
-        assert!(r
-            .recommendations
-            .iter()
-            .all(|x| x.odds_is_estimated == (x.bet_type != "単勝")));
+        // 簡易モデルは買い方を検証していないので、買い目を出さない
+        assert!(r.recommendations.is_empty());
     }
 
-    #[test]
-    fn real_combo_odds_are_used_when_available() {
-        let mut combo = ComboOdds::default();
-        combo.umaren.insert("1-2".into(), 7.7);
-        let r = run_prediction(
-            race_info(false),
+    /// JRA-VAN モデルの勝率を渡したときの予想（勝率は馬番 1..6 の順）
+    fn jv_prediction(finished: bool) -> RacePredictionResult {
+        let probs = [0.30, 0.10, 0.10, 0.15, 0.20, 0.15];
+        let jv = crate::models::JvModelOut {
+            probs: probs.iter().enumerate().map(|(i, p)| (i as u32 + 1, *p)).collect(),
+            contrib: std::collections::HashMap::new(),
+        };
+        run_prediction_with(
+            race_info(finished),
             field(),
             vec![],
             ScoringWeights::default(),
             3000,
             "balance".into(),
             String::new(),
-            combo,
-        );
-        let umaren = r
-            .recommendations
-            .iter()
-            .find(|x| x.bet_type == "馬連" && x.horses == vec![1, 2])
-            .expect("◎-○ の馬連がある");
-        assert_eq!(umaren.est_odds, 7.7);
-        assert!(!umaren.odds_is_estimated);
+            ComboOdds::default(),
+            Some(&jv),
+        )
+    }
+
+    #[test]
+    fn only_win_bets_with_ev_at_least_one_are_bought() {
+        // 期待値: 1番 0.30×2.5=0.75, 2番 0.40, 3番 0.60, 4番 1.50, 5番 4.0, 6番 6.0
+        let r = jv_prediction(false);
+        let mut got: Vec<u32> = r.recommendations.iter().map(|x| x.horses[0]).collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![4, 5, 6]);
+        assert!(r.recommendations.iter().all(|x| x.bet_type == "単勝" && x.suggested_amount == 100 && !x.odds_is_estimated));
+        assert_eq!(r.total_bet, 300);
     }
 
     #[test]
@@ -1521,16 +1481,7 @@ pub(crate) mod tests {
 
     #[test]
     fn applying_result_grades_saved_bets_without_rebuilding_them() {
-        let saved = run_prediction(
-            race_info(false),
-            field(),
-            vec![],
-            ScoringWeights::default(),
-            3000,
-            "balance".into(),
-            String::new(),
-            ComboOdds::default(),
-        );
+        let saved = jv_prediction(false);
         let before: Vec<(String, Vec<u32>, u32)> = saved
             .recommendations
             .iter()

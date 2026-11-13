@@ -2,7 +2,6 @@ import { Save } from "lucide-react";
 import { RacePredictionResult } from "../types";
 import { pct, yen } from "../lib/format";
 import { Cloth } from "./Cloth";
-import { Segmented } from "./Segmented";
 
 export const STRATEGIES = [
   { value: "balance", label: "バランス" },
@@ -83,15 +82,19 @@ export function TicketPanel({
           <p className="mt-1.5 text-[11px] text-ink-muted">確定後に作った予想です。保存しても回収率には含めません。</p>
         )}
       </div>
-      <div className="space-y-2 px-4 pt-2">
-        <Segmented label="配分の方針" value={strategy} options={STRATEGIES} onChange={onStrategy} />
-        <Segmented
-          label="予算"
-          value={budget}
-          options={BUDGETS.map((b) => ({ value: b, label: b.toLocaleString() }))}
-          onChange={onBudget}
-        />
-      </div>
+      <p className="px-4 pt-2 text-[11px] leading-relaxed text-ink-muted">
+        買うのは、期待値 1.0 以上の単勝だけ（1点 100 円）。2022〜2025年の検証で回収率 104.6%（95%区間 89〜120%、確定オッズでの計算）。
+        組み合わせ馬券は検証で回収率 67〜79% だったので出しません。
+      </p>
+      {recs.length === 0 && (
+        <p className="mx-4 mt-2 rounded-md border border-line bg-ground px-3 py-2 text-[12px] font-bold text-ink-soft">
+          {result.model_source === "jravan"
+            ? result.predictions.some((p) => !p.entry.is_scratched && p.entry.win_odds == null)
+              ? "単勝オッズがまだ出ていないので、買い目はありません。"
+              : "期待値 1.0 以上の馬がいないので、このレースは見送りです。"
+            : "このレースは検証済みの JRA-VAN モデルを使えないので、買い目を出しません。"}
+        </p>
+      )}
       <ul className="mt-2 min-h-0 flex-1 overflow-y-auto">
         {recs.map((r, i) => (
           <li
