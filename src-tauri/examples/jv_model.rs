@@ -125,6 +125,10 @@ fn main() {
         explore(&mut data);
         return;
     }
+    if args.iter().any(|a| a == "--years") {
+        years_test(&data);
+        return;
+    }
     if args.iter().any(|a| a == "--wet") {
         wet_test(&data);
         return;
@@ -888,4 +892,25 @@ fn wet_test(data: &[(String, Vec<Runner>)]) {
     println!("\n[判定] (+道悪) − 採用中: {:+.4} [{:+.4}, {:+.4}] ({} レース){}", m, lo, hi, lb.len(), if hi < 0.0 { "  ← 確かに良い（採用）" } else { "  （採用しない）" });
     let (m, lo, hi) = paired_ci(&wet_w, &wet_b);
     println!("[参考・判定に使わない] 稍重以下のレースだけ: {:+.4} [{:+.4}, {:+.4}] ({} レース)", m, lo, hi, wet_b.len());
+}
+
+/// 学習に使う年数を変えて、2023〜2025 年の 1 着の対数損失を比べる（docs/BACKTEST.md の事前の取り決めどおり）
+fn years_test(data: &[(String, Vec<Runner>)]) {
+    let cols: Vec<usize> = ADOPTED.to_vec();
+    let year = |d: &str| d[0..4].parse::<u32>().unwrap_or(0);
+    let test: Vec<&Vec<Runner>> = data.iter().filter(|(d, _)| (2023..=2025).contains(&year(d))).map(|(_, r)| r).collect();
+    let mut losses: Vec<(String, Vec<f64>)> = Vec::new();
+    for (name, from) in [("5年 2018〜2022", 2018), ("8年 2015〜2022", 2015), ("11年 2012〜2022", 2012)] {
+        let train: Vec<&Vec<Runner>> = data.iter().filter(|(d, _)| (from..=2022).contains(&year(d))).map(|(_, r)| r).collect();
+        let b = fit(&train, true, &cols, L2);
+        let ls: Vec<f64> = test.iter().map(|r| loss(r, &race_probs(r, true, &cols, &b))).collect();
+        println!("  {} 学習 {} レース → 2023〜2025 ({} レース) {:.5}", name, train.len(), ls.len(), ls.iter().sum::<f64>() / ls.len() as f64);
+        losses.push((name.to_string(), ls));
+    }
+    let (m, lo, hi) = paired_ci(&losses[2].1, &losses[1].1);
+    println!("\n[判定] 11年 − 8年: {:+.5} [{:+.5}, {:+.5}]{}", m, lo, hi, if hi < 0.0 { "  ← まだ良くなる（昔を取り足す価値あり）" } else { "  （取り足さない）" });
+    let (m, lo, hi) = paired_ci(&losses[2].1, &losses[0].1);
+    println!("[参考] 11年 − 5年: {:+.5} [{:+.5}, {:+.5}]", m, lo, hi);
+    let (m, lo, hi) = paired_ci(&losses[1].1, &losses[0].1);
+    println!("[参考] 8年 − 5年: {:+.5} [{:+.5}, {:+.5}]", m, lo, hi);
 }
