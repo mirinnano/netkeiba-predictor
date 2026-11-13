@@ -66,8 +66,9 @@ async fn analyze_race(
     // DB があれば JRA-VAN モデルの勝率を使う（数秒かかるので別スレッドで）
     let jv = match db {
         Some(p) => {
+            let live = same_day_results(&p, &race_info.race_id).await;
             let (info, ents) = (race_info.clone(), entries.clone());
-            tokio::task::spawn_blocking(move || jvapp::jv_probs(&p, &info, &ents))
+            tokio::task::spawn_blocking(move || jvapp::jv_probs(&p, &info, &ents, &live))
                 .await
                 .map_err(|e| e.to_string())?
                 .unwrap_or_else(|e| {
@@ -89,6 +90,34 @@ async fn analyze_race(
         combo_odds,
         jv.as_ref(),
     ))
+}
+
+/// netkeiba から取った同じ日の先のレース結果（当日の馬場の偏り用）。確定したものだけを覚えて使い回す
+static DAY_RESULTS: std::sync::Mutex<Option<std::collections::HashMap<String, (String, Vec<jvmodel::DayRow>)>>> = std::sync::Mutex::new(None);
+
+/// 同じ日の先のレースのうち、DB に確定成績がないものを netkeiba から取る（1 秒に 1 件まで。取れなければ使わない）
+async fn same_day_results(db: &std::path::Path, race_id: &str) -> std::collections::HashMap<String, (String, Vec<jvmodel::DayRow>)> {
+    // JRA（場コード 01〜10）だけ
+    let jra = race_id.get(4..6).and_then(|v| v.parse::<u32>().ok()).map(|v| (1..=10).contains(&v)).unwrap_or(false);
+    if !jra {
+        return Default::default();
+    }
+    let missing = jvapp::missing_earlier_races(db, race_id);
+    let cached: Vec<String> = {
+        let g = DAY_RESULTS.lock().unwrap();
+        g.as_ref().map(|m| missing.iter().filter(|id| m.contains_key(*id)).cloned().collect()).unwrap_or_default()
+    };
+    if let Ok(client) = scraper::build_client() {
+        for id in missing.iter().filter(|id| !cached.contains(id)) {
+            if let Some((surface, rows)) = scraper::fetch_result_for_bias(&client, id).await {
+                let v: Vec<jvmodel::DayRow> = rows.iter().map(|r| jvmodel::DayRow { umaban: r.umaban, rank: r.rank, corner_last: r.corner_last }).collect();
+                DAY_RESULTS.lock().unwrap().get_or_insert_with(Default::default).insert(id.clone(), (surface, v));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        }
+    }
+    let g = DAY_RESULTS.lock().unwrap();
+    g.as_ref().map(|m| missing.iter().filter_map(|id| m.get(id).map(|v| (id.clone(), v.clone()))).collect()).unwrap_or_default()
 }
 
 /// JvDump の出力フォルダ（out）を、アプリのデータフォルダの keiba.db に取り込む（前回の続きから）
@@ -234,6 +263,19 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// netkeiba の結果ページから、当日の馬場の偏り用に馬場と最後のコーナー順位が取れる（2023 天皇賞秋の前の 11R）
+    #[tokio::test]
+    async fn test_live_result_for_bias() {
+        let client = scraper::build_client().unwrap();
+        let (surface, rows) = scraper::fetch_result_for_bias(&client, "202305050811").await.expect("結果が取れる");
+        assert_eq!(surface, "芝");
+        assert!(rows.len() >= 10);
+        let winner = rows.iter().find(|r| r.rank == 1).unwrap();
+        assert_eq!((winner.umaban, winner.corner_last), (7, Some(6)), "1 着 7 番、通過 6-7-6");
+        // 同じ日の先のレース
+        assert_eq!(jvapp::earlier_race_ids("202305050803"), vec!["202305050801".to_string(), "202305050802".to_string()]);
+    }
 
     #[tokio::test]
     async fn test_live_scrape_and_predict() {

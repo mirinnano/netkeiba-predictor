@@ -269,6 +269,8 @@ pub struct ResultRow {
     pub last_3f: Option<f64>,
     pub win_odds: Option<f64>,
     pub popularity: Option<u32>,
+    /// 最後のコーナーの通過順位（通過「6-7-6」の最後の数）
+    pub corner_last: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

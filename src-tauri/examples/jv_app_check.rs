@@ -7,11 +7,13 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let db = std::path::PathBuf::from(&args[0]);
     let (info, entries) = jvapp::race_from_db(&db, &args[1]).expect("DB にそのレースがありません");
+    let surface = info.surface.clone();
     let t = std::time::Instant::now();
-    let jv = jvapp::jv_probs(&db, &info, &entries).expect("JRA-VAN モデルでエラー");
+    let none = std::collections::HashMap::new();
+    let jv = jvapp::jv_probs(&db, &info, &entries, &none).expect("JRA-VAN モデルでエラー");
     let first = t.elapsed().as_secs_f64();
     let t = std::time::Instant::now();
-    let _ = jvapp::jv_probs(&db, &info, &entries).unwrap();
+    let _ = jvapp::jv_probs(&db, &info, &entries, &none).unwrap();
     println!("勝率の計算: 1回目 {:.1} 秒 / 2回目（Engine を使い回し）{:.2} 秒", first, t.elapsed().as_secs_f64());
     let r = predictor::run_prediction_with(
         info,
@@ -26,6 +28,18 @@ fn main() {
     );
     if let Some(i) = args.iter().position(|a| a == "--json") {
         std::fs::write(&args[i + 1], serde_json::to_string(&r).unwrap()).expect("書き込めません");
+    }
+    {
+        // 当日の馬場の偏り（DB にある同じ日・同じ馬場の先のレースから）
+        let conn = netkeiba_predictor_lib::jvstore::open(&db).unwrap();
+        let earlier: Vec<_> = jvapp::earlier_race_ids(&args[1])
+            .iter()
+            .filter_map(|id| netkeiba_predictor_lib::jvstore::race_by_id(&conn, id).ok().flatten())
+            .filter(|r| r.kubun == '7' && r.surface == surface)
+            .collect();
+        let refs: Vec<_> = earlier.iter().collect();
+        let (a, b) = netkeiba_predictor_lib::jvmodel::day_bias(&refs);
+        println!("当日の馬場の偏り（先の同じ馬場 {} レース）: 内外 {:+.3} / 前後 {:+.3}（負なら内・前が有利）", earlier.len(), a, b);
     }
     println!("{} {} {} / モデル: {} / 確定: {}", r.race_info.date_str, r.race_info.race_name, r.race_info.source_url, r.model_source, r.race_info.is_finished);
     for p in r.predictions.iter().filter(|p| !p.entry.is_scratched).take(6) {

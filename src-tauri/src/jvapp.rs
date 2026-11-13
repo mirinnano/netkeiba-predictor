@@ -71,7 +71,13 @@ fn age_of(sex_age: &str) -> u32 {
 }
 
 /// JRA-VAN モデルの勝率と要素別の寄与。平地以外・DB にない日付などで使えないときは None
-pub fn jv_probs(db: &Path, info: &RaceInfo, entries: &[HorseEntry]) -> Result<Option<JvModelOut>, String> {
+/// `live` は netkeiba から取った同じ日の先のレース結果（race_id → (馬場, 各馬)）。DB にあるレースは DB を優先する
+pub fn jv_probs(
+    db: &Path,
+    info: &RaceInfo,
+    entries: &[HorseEntry],
+    live: &HashMap<String, (String, Vec<jvmodel::DayRow>)>,
+) -> Result<Option<JvModelOut>, String> {
     if !(info.surface == "芝" || info.surface == "ダ") {
         return Ok(None); // 障害戦は学習していない
     }
@@ -124,7 +130,9 @@ pub fn jv_probs(db: &Path, info: &RaceInfo, entries: &[HorseEntry]) -> Result<Op
         let engine = jvmodel::build_engine(&conn, date).map_err(|e| e.to_string())?;
         *guard = Some(Cached { path: db.to_path_buf(), date, mtime: mtime(db), engine });
     }
-    let engine = &guard.as_ref().unwrap().engine;
+    let bias = same_day_bias(&conn, &info.race_id, &info.surface, live);
+    let engine = &mut guard.as_mut().unwrap().engine;
+    engine.set_day_bias(bias);
     let x = engine.features(&card);
     let odds: Vec<Option<f64>> = started.iter().map(|e| e.win_odds).collect();
     let (p, _with_market, contrib) = jvmodel::win_probs_detail(&x, &odds);
@@ -132,6 +140,45 @@ pub fn jv_probs(db: &Path, info: &RaceInfo, entries: &[HorseEntry]) -> Result<Op
         probs: card.runners.iter().zip(&p).map(|(h, p)| (h.umaban, *p)).collect(),
         contrib: card.runners.iter().zip(&contrib).map(|(h, c)| (h.umaban, c.to_vec())).collect(),
     }))
+}
+
+/// 同じ日・同じ場（race_id の先頭 10 桁が同じ）で、R が小さいレースの race_id
+pub fn earlier_race_ids(race_id: &str) -> Vec<String> {
+    let Some(r) = race_id.get(10..12).and_then(|x| x.parse::<u32>().ok()) else { return Vec::new() };
+    (1..r).map(|k| format!("{}{:02}", &race_id[..10], k)).collect()
+}
+
+/// 当日の馬場の偏り（同じ馬場の先のレースから）。DB の確定成績を優先し、なければ netkeiba から取った結果を使う
+fn same_day_bias(
+    conn: &rusqlite::Connection,
+    race_id: &str,
+    surface: &str,
+    live: &HashMap<String, (String, Vec<jvmodel::DayRow>)>,
+) -> (f64, f64) {
+    let mut rows: Vec<Vec<jvmodel::DayRow>> = Vec::new();
+    for id in earlier_race_ids(race_id) {
+        match jvstore::race_by_id(conn, &id).ok().flatten().filter(|r| r.kubun == '7') {
+            Some(r) if r.surface == surface => rows.push(jvmodel::day_rows(&r)),
+            Some(_) => {}
+            None => {
+                if let Some((s, v)) = live.get(&id) {
+                    if s == surface {
+                        rows.push(v.clone());
+                    }
+                }
+            }
+        }
+    }
+    jvmodel::day_bias_rows(&rows)
+}
+
+/// DB にまだ確定成績がない、同じ日の先のレース（netkeiba から取る必要があるもの）
+pub fn missing_earlier_races(db: &Path, race_id: &str) -> Vec<String> {
+    let Ok(conn) = jvstore::open(db) else { return Vec::new() };
+    earlier_race_ids(race_id)
+        .into_iter()
+        .filter(|id| jvstore::race_by_id(&conn, id).ok().flatten().map(|r| r.kubun != '7').unwrap_or(true))
+        .collect()
 }
 
 /// netkeiba が使えないとき用: DB の JRA-VAN 出馬表から、アプリの入力を組み立てる（過去走の詳細は持たない）

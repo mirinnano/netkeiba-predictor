@@ -19,10 +19,10 @@ pub const NAMES: [&str; 49] = [
     "当日の内外×馬番", "当日の前後×脚質",
 ];
 
-/// 採用している特徴量（調教の詳細 38〜42 は検証で悪化したので使わない）
-pub const ADOPTED: [usize; 38] = [
+/// 採用している特徴量（調教の詳細 38〜42・血統 43〜46 は検証で効かなかったので使わない。当日の馬場の偏り 47・48 は 2026-11-14 に採用）
+pub const ADOPTED: [usize; 40] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
-    33, 34, 35, 36, 37,
+    33, 34, 35, 36, 37, 47, 48,
 ];
 
 #[derive(Clone)]
@@ -183,24 +183,44 @@ pub struct Engine {
     day_bias: (f64, f64),
 }
 
-/// 当日の馬場の偏り。先に終わったレース（2 つ以上）の結果から
-/// 内外 = 内 1/3 の平均着順率 − 外 1/3 の平均着順率、前後 = 4 角で前 1/3 の平均着順率 − 後ろ 1/3 の平均着順率（負なら内・前が有利）
+/// 当日の馬場の偏りを測るための、先に終わったレースの 1 頭分（馬番・着順・最後のコーナー順位）
+#[derive(Debug, Clone, Copy)]
+pub struct DayRow {
+    pub umaban: u32,
+    pub rank: u32,
+    pub corner_last: Option<u32>,
+}
+
+/// JRA-VAN の確定レースから DayRow を作る（出走して着順がある馬だけ）
+pub fn day_rows(r: &JvRace) -> Vec<DayRow> {
+    r.runners
+        .iter()
+        .filter(|h| started(h))
+        .filter_map(|h| h.rank.map(|k| DayRow { umaban: h.umaban, rank: k, corner_last: h.corners[3] }))
+        .collect()
+}
+
 pub fn day_bias(earlier: &[&JvRace]) -> (f64, f64) {
+    day_bias_rows(&earlier.iter().map(|r| day_rows(r)).collect::<Vec<_>>())
+}
+
+/// 当日の馬場の偏り。先に終わったレース（2 つ以上）の結果から
+/// 内外 = 内 1/3 の平均着順率 − 外 1/3 の平均着順率、前後 = 最後のコーナーで前 1/3 の平均着順率 − 後ろ 1/3 の平均着順率（負なら内・前が有利）
+pub fn day_bias_rows(earlier: &[Vec<DayRow>]) -> (f64, f64) {
     if earlier.len() < 2 {
         return (f64::NAN, f64::NAN);
     }
     let (mut ins, mut outs, mut fr, mut bk) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for r in earlier {
-        let st: Vec<&JvRunner> = r.runners.iter().filter(|h| started(h) && h.rank.is_some()).collect();
+    for st in earlier {
         let n = st.len() as f64;
         if n < 5.0 {
             continue;
         }
-        for h in &st {
-            let fin = (h.rank.unwrap() as f64 - 1.0) / (n - 1.0);
+        for h in st {
+            let fin = (h.rank as f64 - 1.0) / (n - 1.0);
             let draw = h.umaban as f64 / n;
             if draw <= 1.0 / 3.0 { ins.push(fin) } else if draw > 2.0 / 3.0 { outs.push(fin) }
-            if let Some(c) = h.corners[3] {
+            if let Some(c) = h.corner_last {
                 let q = c as f64 / n;
                 if q <= 1.0 / 3.0 { fr.push(fin) } else if q > 2.0 / 3.0 { bk.push(fin) }
             }
@@ -569,9 +589,9 @@ fn softmax(v: &[f64]) -> Vec<f64> {
 
 /// 採用特徴量（ADOPTED の順）が、表示用のどの要素に入るか（models::FACTOR_NAMES の 0..5）
 /// 0=能力 1=時計 2=適性 3=騎手・枠 4=展開 5=調教
-pub const JV_GROUP: [usize; 38] = [
+pub const JV_GROUP: [usize; 40] = [
     1, 1, 1, 1, 4, 4, 0, 0, 0, 0, 0, 3, 3, 3, 0, 2, 2, 3, 0, 0, 0, 0, 0, 0, 3, 4, 2, 2, 3, 3,
-    5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 3, 4,
 ];
 
 /// 勝率。全頭に単勝オッズがあれば「市場＋モデル」、なければ「モデルのみ」の係数を使う。

@@ -1611,6 +1611,7 @@ pub(crate) mod tests {
             last_3f: None,
             win_odds: Some(99.0),
             popularity: None,
+            corner_last: None,
         }];
         let payouts = vec![OfficialPayoutItem {
             bet_type: "単勝".into(),

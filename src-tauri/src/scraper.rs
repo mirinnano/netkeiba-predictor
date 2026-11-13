@@ -682,6 +682,7 @@ fn parse_result_rows(doc: &Html) -> Vec<ResultRow> {
     let pop_sel = Selector::parse("td.Odds span.OddsPeople").unwrap();
     let odds_sel = Selector::parse("td.Odds span.Odds_Ninki").unwrap();
     let bg_time_sel = Selector::parse("td.Time").unwrap();
+    let passage_sel = Selector::parse("td.PassageRate").unwrap();
 
     let mut rows = Vec::new();
     for tr in doc.select(&tr_sel) {
@@ -730,6 +731,12 @@ fn parse_result_rows(doc: &Html) -> Vec<ResultRow> {
             }
         }
 
+        let corner_last = tr
+            .select(&passage_sel)
+            .next()
+            .map(|el| clean_text(&el.text().collect::<String>()))
+            .and_then(|s| s.split('-').filter(|x| !x.is_empty()).last().and_then(|x| x.trim().parse::<u32>().ok()));
+
         rows.push(ResultRow {
             umaban,
             rank,
@@ -737,9 +744,24 @@ fn parse_result_rows(doc: &Html) -> Vec<ResultRow> {
             last_3f,
             win_odds,
             popularity,
+            corner_last,
         });
     }
     rows
+}
+
+/// 当日の馬場の偏り用: JRA のレース結果（馬場 "芝"/"ダ"/"障" と各馬の着順・最後のコーナー順位）。未確定なら None
+pub async fn fetch_result_for_bias(client: &reqwest::Client, race_id: &str) -> Option<(String, Vec<ResultRow>)> {
+    let url = format!("https://race.netkeiba.com/race/result.html?race_id={}", race_id);
+    let html = fetch_html(client, &url).await.ok()?;
+    let doc = Html::parse_document(&html);
+    let rows = parse_result_rows(&doc);
+    if rows.is_empty() {
+        return None;
+    }
+    let data_sel = Selector::parse(".RaceData01").unwrap();
+    let txt = doc.select(&data_sel).next().map(|el| el.text().collect::<String>()).unwrap_or_default();
+    Some((detect_surface(&txt), rows))
 }
 
 /// 確定着順を出走馬に書き込む。fill_odds が true なら、オッズ未取得の馬に確定オッズを補う。
