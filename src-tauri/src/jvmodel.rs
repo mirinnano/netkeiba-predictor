@@ -8,7 +8,7 @@ use crate::jvdata::{JvRace, JvRunner, JvWork};
 use chrono::Datelike;
 use std::collections::HashMap;
 
-pub const NAMES: [&str; 49] = [
+pub const NAMES: [&str; 50] = [
     "指数最高3", "指数平均3", "指数前走", "上がり順位", "展開不利", "4角から挽回", "着差", "着順率", "過去人気",
     "人気以上", "クラス変化", "騎手3着内", "調教師3着内", "騎手勝率", "間隔", "距離変更", "芝ダ替わり", "斤量差",
     "馬体重増減", "馬体重", "馬齢", "出走数", "ブリンカー", "初ブリンカー", "馬番位置", "脚質", "同場3着内", "同距離3着内",
@@ -17,6 +17,7 @@ pub const NAMES: [&str; 49] = [
     "最終追切の加速", "自己比ラスト1F", "併せ馬", "28日本数", "最終が坂路",
     "父の同条件", "母父の同条件", "父の馬場適性", "父×未経験条件",
     "当日の内外×馬番", "当日の前後×脚質",
+    "道悪×道悪実績",
 ];
 
 /// 採用している特徴量（調教の詳細 38〜42・血統 43〜46 は検証で効かなかったので使わない。当日の馬場の偏り 47・48 は 2026-11-14 に採用）
@@ -44,6 +45,8 @@ struct Run {
     blinker: bool,
     jockey: String,
     trainer: String,
+    /// 馬場状態（1 良, 2 稍重, 3 重, 4 不良, 0 不明）
+    going: u8,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -89,6 +92,8 @@ pub struct Card {
     pub surface: String,
     pub distance: u32,
     pub class: f64,
+    /// その日のこのレースの馬場状態（1 良, 2 稍重, 3 重, 4 不良, 0 不明）
+    pub going: u8,
     pub runners: Vec<CardRunner>,
 }
 
@@ -147,6 +152,7 @@ pub fn card_from_jv(r: &JvRace) -> Card {
         surface: r.surface.clone(),
         distance: r.distance,
         class: class_level(&r.condition_min, &r.grade),
+        going: going(r).parse().unwrap_or(0),
         runners: r
             .runners
             .iter()
@@ -388,6 +394,7 @@ impl Engine {
                     blinker: h.blinker,
                     jockey: h.jockey.clone(),
                     trainer: h.trainer.clone(),
+                    going: going(r).parse().unwrap_or(0),
                 });
                 let w = if h.rank == Some(1) { 1.0 } else { 0.0 };
                 let t = if h.rank.map(|k| k <= 3).unwrap_or(false) { 1.0 } else { 0.0 };
@@ -545,6 +552,14 @@ impl Engine {
                 row.push(self.day_bias.0 * (h.umaban as f64 / n - 0.5));
                 let pos = avg(&|r| r.pos4);
                 row.push(self.day_bias.1 * (pos - 0.5));
+                // 道悪×道悪実績: その日が稍重以下のときだけ、同じ馬場の道悪での 3 着内率 − 全体の 3 着内率
+                row.push(if card.going >= 2 {
+                    let surf: Vec<&&Run> = past.iter().filter(|x| x.surface == card.surface).collect();
+                    let wet: Vec<&&Run> = surf.iter().copied().filter(|x| x.going >= 2).collect();
+                    if wet.is_empty() { f64::NAN } else { top3_rate(&wet) - top3_rate(&surf) }
+                } else {
+                    0.0
+                });
                 row
             })
             .collect()

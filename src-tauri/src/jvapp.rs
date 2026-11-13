@@ -133,6 +133,14 @@ pub fn jv_probs(
             .as_ref()
             .map(|r| jvmodel::class_level(&r.condition_min, &r.grade))
             .unwrap_or_else(|| class_from_netkeiba(info)),
+        // 馬場状態は当日の発表（netkeiba の「良/稍/重/不」）。発表前は不明
+        going: match info.track_cond.chars().next() {
+            Some('良') => 1,
+            Some('稍') => 2,
+            Some('重') => 3,
+            Some('不') => 4,
+            _ => 0,
+        },
         runners: started
             .iter()
             .map(|e| {

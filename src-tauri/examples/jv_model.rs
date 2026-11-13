@@ -125,6 +125,10 @@ fn main() {
         explore(&mut data);
         return;
     }
+    if args.iter().any(|a| a == "--wet") {
+        wet_test(&data);
+        return;
+    }
     match export {
         Some(p) => export_coefficients(&data, &p),
         None => evaluate(&data, &classes),
@@ -849,4 +853,39 @@ fn evaluate(data: &[(String, Vec<Runner>)], classes: &[f64]) {
     for (ti, t) in TH.iter().enumerate() {
         println!("  期待値 ≥ {:.1}: {:.1}%（{} 点）", t, roi[ti].1 / roi[ti].0.max(1.0) * 100.0, (roi[ti].0 / 100.0) as u64);
     }
+}
+
+/// 道悪×道悪実績（列 49）の上積みを、事前に決めた手順どおりに一度だけ確かめる（docs/BACKTEST.md）
+fn wet_test(data: &[(String, Vec<Runner>)]) {
+    let base: Vec<usize> = ADOPTED.to_vec();
+    let with: Vec<usize> = base.iter().copied().chain([49]).collect();
+    let folds = 8;
+    let per = data.len() / folds;
+    let (mut lb, mut lw, mut wet_b, mut wet_w) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut coef = Vec::new();
+    for k in 4..folds {
+        let train: Vec<&Vec<Runner>> = data[..k * per].iter().map(|(_, r)| r).collect();
+        let test = &data[k * per..((k + 1) * per).min(data.len())];
+        let bb = fit(&train, true, &base, L2);
+        let bw = fit(&train, true, &with, L2);
+        coef.push(*bw.last().unwrap());
+        for (_, r) in test {
+            let a = loss(r, &race_probs(r, true, &base, &bb));
+            let b = loss(r, &race_probs(r, true, &with, &bw));
+            lb.push(a);
+            lw.push(b);
+            // 参考: その日が稍重以下だったレース（列 49 がどこかで 0 でない）
+            if r.iter().any(|x| x.x[49].abs() > 1e-12) {
+                wet_b.push(a);
+                wet_w.push(b);
+            }
+        }
+        println!("  区間 {} ({}R) 採用中 {:.4} / +道悪 {:.4} / 係数 {:+.4}", k, test.len(),
+            lb[lb.len() - test.len()..].iter().sum::<f64>() / test.len() as f64,
+            lw[lw.len() - test.len()..].iter().sum::<f64>() / test.len() as f64, coef.last().unwrap());
+    }
+    let (m, lo, hi) = paired_ci(&lw, &lb);
+    println!("\n[判定] (+道悪) − 採用中: {:+.4} [{:+.4}, {:+.4}] ({} レース){}", m, lo, hi, lb.len(), if hi < 0.0 { "  ← 確かに良い（採用）" } else { "  （採用しない）" });
+    let (m, lo, hi) = paired_ci(&wet_w, &wet_b);
+    println!("[参考・判定に使わない] 稍重以下のレースだけ: {:+.4} [{:+.4}, {:+.4}] ({} レース)", m, lo, hi, wet_b.len());
 }
