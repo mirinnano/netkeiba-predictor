@@ -16,6 +16,7 @@ if [ "$2" = "--push" ]; then
   PKG=com.keibascope.predictor
   "$ADB" push "$OUT" /data/local/tmp/keiba.db
   # デバッグ版のアプリのデータフォルダ（app_data_dir）に置く
-  "$ADB" shell "run-as $PKG sh -c 'mkdir -p files && cp /data/local/tmp/keiba.db files/keiba.db && ls -l files'"
+  # Android の app_data_dir はアプリのデータフォルダの直下（files/ ではない）
+  "$ADB" shell "run-as $PKG sh -c 'cp /data/local/tmp/keiba.db ./keiba.db && ls -l keiba.db'"
   "$ADB" shell rm /data/local/tmp/keiba.db
 fi
