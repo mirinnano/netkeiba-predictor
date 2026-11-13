@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::models::{
     combo_key, BetRecommendation, ComboOdds, HorseEntry, HorsePrediction, OfficialPayoutItem,
     PaceAnalysis, RaceInfo, RacePredictionResult, ResultRow, ScoringWeights,
@@ -1165,6 +1166,21 @@ pub fn generate_recommendations(
     let odds_basis: &[f64] = market_p.as_deref().unwrap_or(&model_p);
     let hm = harville::Model::new(&model_p);
     let hb = harville::Model::new(odds_basis);
+    // 組み合わせの確率は、組み合わせのオッズ（市場）とモデルをロジットの空間で混ぜる（JRA-VAN モデルで、オッズが揃っているときだけ）。
+    // 混ぜたほうがモデルだけより確かに良かった（docs/BACKTEST.md「組み合わせの確率に市場を混ぜる」）
+    let n_act = active.len();
+    let mixed: [HashMap<String, f64>; 3] = if validated_model {
+        [
+            mix_combo_probs(&(0..n_act).flat_map(|a| ((a + 1)..n_act).map(move |c| vec![a, c])).collect::<Vec<_>>(),
+                &active, &combo_odds.umaren, |v| hm.quinella(v[0], v[1]), COMBO_MIX[0], 1.0),
+            mix_combo_probs(&(0..n_act).flat_map(|a| ((a + 1)..n_act).map(move |c| vec![a, c])).collect::<Vec<_>>(),
+                &active, &combo_odds.wide, |v| hm.wide(v[0], v[1]), COMBO_MIX[1], 3.0),
+            mix_combo_probs(&(0..n_act).flat_map(|a| ((a + 1)..n_act).flat_map(move |c| ((c + 1)..n_act).map(move |d| vec![a, c, d]))).collect::<Vec<_>>(),
+                &active, &combo_odds.sanrenpuku, |v| hm.trio(v[0], v[1], v[2]), COMBO_MIX[2], 1.0),
+        ]
+    } else {
+        [HashMap::new(), HashMap::new(), HashMap::new()]
+    };
 
     let honmei = 0;
     let taikou = 1;
@@ -1201,19 +1217,19 @@ pub fn generate_recommendations(
                 TAKEOUT_WIN,
             ),
             "馬連" => (
-                hm.quinella(idx[0], idx[1]),
+                mixed[0].get(&key).copied().unwrap_or_else(|| hm.quinella(idx[0], idx[1])),
                 combo_odds.umaren.get(&key).copied(),
                 hb.quinella(idx[0], idx[1]),
                 TAKEOUT_UMAREN,
             ),
             "ワイド" => (
-                hm.wide(idx[0], idx[1]),
+                mixed[1].get(&key).copied().unwrap_or_else(|| hm.wide(idx[0], idx[1])),
                 combo_odds.wide.get(&key).copied(),
                 hb.wide(idx[0], idx[1]),
                 TAKEOUT_WIDE,
             ),
             _ => (
-                hm.trio(idx[0], idx[1], idx[2]),
+                mixed[2].get(&key).copied().unwrap_or_else(|| hm.trio(idx[0], idx[1], idx[2])),
                 combo_odds.sanrenpuku.get(&key).copied(),
                 hb.trio(idx[0], idx[1], idx[2]),
                 TAKEOUT_TRIO,
@@ -1330,6 +1346,39 @@ pub fn generate_recommendations(
     }
 
     recs
+}
+
+/// 組み合わせの確率を市場と混ぜる重み（市場 α, モデル β）。馬連・ワイド・3連複の順。
+/// 2016〜2021 年で当てはめ、2022〜2025 年で「モデルだけ」より確かに良かった値（docs/BACKTEST.md）
+pub const COMBO_MIX: [(f64, f64); 3] = [(0.647, 0.379), (0.645, 0.397), (0.745, 0.302)];
+
+/// 組み合わせごとに、市場の確率（1/オッズを合計 k に割り戻す）とモデルの確率を α・β で混ぜる。
+/// オッズのある組み合わせが 8 割に満たなければ、市場が分からないとみなして空を返す（呼び出し側はモデルだけを使う）
+pub fn mix_combo_probs(
+    combos: &[Vec<usize>],
+    active: &[&HorsePrediction],
+    odds: &HashMap<String, f64>,
+    model: impl Fn(&[usize]) -> f64,
+    (a, b): (f64, f64),
+    k: f64,
+) -> HashMap<String, f64> {
+    let rows: Vec<(String, f64, f64)> = combos
+        .iter()
+        .filter_map(|v| {
+            let key = combo_key(&v.iter().map(|&i| active[i].entry.umaban).collect::<Vec<_>>());
+            let o = *odds.get(&key)?;
+            (o > 0.0).then(|| (key, 1.0 / o, model(v).max(1e-12)))
+        })
+        .collect();
+    if combos.is_empty() || (rows.len() as f64) < combos.len() as f64 * 0.8 {
+        return HashMap::new();
+    }
+    let (sq, sm) = rows.iter().fold((0.0, 0.0), |s, r| (s.0 + r.1, s.1 + r.2));
+    let s: Vec<f64> = rows.iter().map(|r| a * (r.1 / sq * k).ln() + b * (r.2 / sm * k).ln()).collect();
+    let mx = s.iter().cloned().fold(f64::MIN, f64::max);
+    let e: Vec<f64> = s.iter().map(|x| (x - mx).exp()).collect();
+    let tot: f64 = e.iter().sum();
+    rows.into_iter().zip(e).map(|(r, x)| (r.0, x / tot * k)).collect()
 }
 
 pub fn verify_recommendations_with_payouts(
@@ -1459,6 +1508,35 @@ pub(crate) mod tests {
             entry(5, 9, 20.0),
             entry(6, 12, 40.0),
         ]
+    }
+
+    #[test]
+    fn mixed_combo_probs_sum_to_k_and_reduce_to_each_side() {
+        let r = jv_prediction(false);
+        let active: Vec<&HorsePrediction> = r.predictions.iter().collect();
+        let n = active.len();
+        let pairs: Vec<Vec<usize>> = (0..n).flat_map(|a| ((a + 1)..n).map(move |c| vec![a, c])).collect();
+        let odds: HashMap<String, f64> = pairs
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (combo_key(&v.iter().map(|&x| active[x].entry.umaban).collect::<Vec<_>>()), 5.0 + i as f64))
+            .collect();
+        let model = |v: &[usize]| (v[0] + 1) as f64 * (v[1] + 1) as f64;
+        // 合計は k
+        for k in [1.0, 3.0] {
+            let m = mix_combo_probs(&pairs, &active, &odds, model, (0.6, 0.4), k);
+            assert_eq!(m.len(), pairs.len());
+            assert!((m.values().sum::<f64>() - k).abs() < 1e-9);
+        }
+        // α=1, β=0 なら市場（1/オッズを割り戻したもの）そのもの
+        let m = mix_combo_probs(&pairs, &active, &odds, model, (1.0, 0.0), 1.0);
+        let sq: f64 = odds.values().map(|o| 1.0 / o).sum();
+        for (key, o) in &odds {
+            assert!((m[key] - (1.0 / o) / sq).abs() < 1e-9);
+        }
+        // オッズが 8 割に満たなければ空（モデルだけに戻る）
+        let few: HashMap<String, f64> = odds.iter().take(pairs.len() / 2).map(|(k, v)| (k.clone(), *v)).collect();
+        assert!(mix_combo_probs(&pairs, &active, &few, model, (0.6, 0.4), 1.0).is_empty());
     }
 
     #[test]

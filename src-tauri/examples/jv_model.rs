@@ -111,6 +111,11 @@ fn main() {
         coverage.0,
         coverage.1 as f64 / coverage.0.max(1) as f64 * 100.0
     );
+    if args.iter().any(|a| a == "--combo-market") {
+        let dirs: Vec<std::path::PathBuf> = args.windows(2).filter(|w| w[0] == "--dir").map(|w| std::path::PathBuf::from(&w[1])).collect();
+        combo_market(&data, &classes, &race_ids, &dirs);
+        return;
+    }
     if args.iter().any(|a| a == "--plan") {
         // RACE フォルダ（払戻・オッズ）を --dir で複数指定できる
         let dirs: Vec<std::path::PathBuf> = args.windows(2).filter(|w| w[0] == "--dir").map(|w| std::path::PathBuf::from(&w[1])).collect();
@@ -913,4 +918,219 @@ fn years_test(data: &[(String, Vec<Runner>)]) {
     println!("[参考] 11年 − 5年: {:+.5} [{:+.5}, {:+.5}]", m, lo, hi);
     let (m, lo, hi) = paired_ci(&losses[1].1, &losses[0].1);
     println!("[参考] 8年 − 5年: {:+.5} [{:+.5}, {:+.5}]", m, lo, hi);
+}
+
+/// 1 レース・1 券種の組み合わせ: (log 市場の確率, log モデルの確率, オッズ, 100 円あたりの払戻)
+type Combo = (f64, f64, f64, f64);
+
+/// 組み合わせの確率に市場を混ぜる検証（docs/BACKTEST.md・ADR-001 の A。事前の取り決めどおり一度だけ）
+fn combo_market(data: &[(String, Vec<Runner>)], classes: &[f64], race_ids: &[String], dirs: &[std::path::PathBuf]) {
+    use netkeiba_predictor_lib::models::combo_key;
+    use netkeiba_predictor_lib::predictor::harville;
+    let mut pay: HashMap<String, HashMap<(String, Vec<u32>), u64>> = HashMap::new();
+    let mut odds: HashMap<String, netkeiba_predictor_lib::models::ComboOdds> = HashMap::new();
+    for d in dirs {
+        let (p, o) = load_bet_data(d);
+        pay.extend(p);
+        odds.extend(o);
+    }
+    println!("払戻 {} レース / オッズ {} レース", pay.len(), odds.len());
+    let cols: Vec<usize> = ADOPTED.to_vec();
+    let year = |i: usize| -> u32 { data[i].0[0..4].parse().unwrap_or(0) };
+    // 年ごとに当てはめ直した勝率を、レースごとに持つ
+    let mut races: Vec<(u32, usize, Vec<f64>)> = Vec::new();
+    for y in 2016..=2025u32 {
+        let train: Vec<&Vec<Runner>> = (0..data.len()).filter(|&i| year(i) >= 2012 && year(i) < y).map(|i| &data[i].1).collect();
+        if train.len() < 1000 {
+            continue;
+        }
+        let b = fit(&train, true, &cols, L2);
+        for i in (0..data.len()).filter(|&i| year(i) == y) {
+            let id = &race_ids[i];
+            if pay.contains_key(id) && odds.contains_key(id) {
+                races.push((y, i, race_probs(&data[i].1, true, &cols, &b)));
+            }
+        }
+        eprintln!("{} 年 完了（レース {}）", y, races.len());
+    }
+    const TYPES: [(&str, f64); 3] = [("馬連", 1.0), ("ワイド", 3.0), ("3連複", 1.0)];
+    // 1 レース・1 券種の組み合わせを作る（オッズのある組み合わせだけ。市場もモデルも合計 k に割り戻す）
+    let combos = |t: usize, ri: usize| -> Vec<Combo> {
+        let (y_, i, p) = &races[ri];
+        let _ = y_;
+        let race = &data[*i].1;
+        let (om, pm) = (&odds[&race_ids[*i]], &pay[&race_ids[*i]]);
+        let h = harville::Model::new(p);
+        let n = race.len();
+        let mut v: Vec<(f64, f64, f64, f64)> = Vec::new();
+        let mut push = |hs: Vec<usize>, m: f64, map: &HashMap<String, f64>| {
+            let us: Vec<u32> = hs.iter().map(|&a| race[a].umaban).collect();
+            let key = combo_key(&us);
+            if let Some(&o) = map.get(&key) {
+                if o > 0.0 {
+                    let mut k = us.clone();
+                    k.sort_unstable();
+                    let paid = pm.get(&(TYPES[t].0.to_string(), k)).copied().unwrap_or(0) as f64;
+                    v.push((1.0 / o, m.max(1e-12), o, paid));
+                }
+            }
+        };
+        for a in 0..n {
+            for c in a + 1..n {
+                match t {
+                    0 => push(vec![a, c], h.quinella(a, c), &om.umaren),
+                    1 => push(vec![a, c], h.wide(a, c), &om.wide),
+                    _ => {
+                        for d in c + 1..n {
+                            push(vec![a, c, d], h.trio(a, c, d), &om.sanrenpuku);
+                        }
+                    }
+                }
+            }
+        }
+        let k = TYPES[t].1;
+        let (sq, sm): (f64, f64) = v.iter().fold((0.0, 0.0), |a, x| (a.0 + x.0, a.1 + x.1));
+        v.into_iter().map(|(q, m, o, paid)| ((q / sq * k).ln(), (m / sm * k).ln(), o, paid)).collect()
+    };
+    // softmax(α·lq + β·lm) を券種の合計 k に戻した確率
+    let probs = |v: &[Combo], a: f64, b: f64, k: f64| -> Vec<f64> {
+        let s: Vec<f64> = v.iter().map(|c| a * c.0 + b * c.1).collect();
+        softmax(&s).into_iter().map(|x| x * k).collect()
+    };
+    // 的中した組み合わせの平均の負の対数（softmax の分布として）
+    let race_loss = |v: &[Combo], a: f64, b: f64| -> Option<f64> {
+        let s: Vec<f64> = v.iter().map(|c| a * c.0 + b * c.1).collect();
+        let p = softmax(&s);
+        let w: Vec<f64> = v.iter().zip(&p).filter(|(c, _)| c.3 > 0.0).map(|(_, q)| -q.max(1e-300).ln()).collect();
+        if w.is_empty() { None } else { Some(w.iter().sum::<f64>() / w.len() as f64) }
+    };
+    let sel: Vec<usize> = (0..races.len()).filter(|&r| races[r].0 <= 2021).collect();
+    let conf: Vec<usize> = (0..races.len()).filter(|&r| races[r].0 >= 2022).collect();
+    println!("レース数: 選ぶ期間 {} / 確かめる期間 {}", sel.len(), conf.len());
+    let mut cands: Vec<Cand> = Vec::new();
+    for t in 0..3 {
+        // ニュートン法で α・β を当てはめる（対数尤度は α・β について凹）
+        let (mut a, mut b) = (0.5, 0.5);
+        for _ in 0..20 {
+            let (mut g, mut h) = ([0.0f64; 2], [[0.0f64; 2]; 2]);
+            for &r in &sel {
+                let v = combos(t, r);
+                let s: Vec<f64> = v.iter().map(|c| a * c.0 + b * c.1).collect();
+                let p = softmax(&s);
+                let ex = [v.iter().zip(&p).map(|(c, q)| q * c.0).sum::<f64>(), v.iter().zip(&p).map(|(c, q)| q * c.1).sum::<f64>()];
+                let exx = [
+                    v.iter().zip(&p).map(|(c, q)| q * c.0 * c.0).sum::<f64>(),
+                    v.iter().zip(&p).map(|(c, q)| q * c.0 * c.1).sum::<f64>(),
+                    v.iter().zip(&p).map(|(c, q)| q * c.1 * c.1).sum::<f64>(),
+                ];
+                let wins: Vec<&Combo> = v.iter().filter(|c| c.3 > 0.0).collect();
+                if wins.is_empty() {
+                    continue;
+                }
+                let w = wins.len() as f64;
+                // 的中が複数（ワイド）のときは平均を取り、1 レースの重みを 1 にそろえる
+                g[0] += wins.iter().map(|c| c.0).sum::<f64>() / w - ex[0];
+                g[1] += wins.iter().map(|c| c.1).sum::<f64>() / w - ex[1];
+                h[0][0] -= exx[0] - ex[0] * ex[0];
+                h[0][1] -= exx[1] - ex[0] * ex[1];
+                h[1][1] -= exx[2] - ex[1] * ex[1];
+            }
+            h[1][0] = h[0][1];
+            let det = h[0][0] * h[1][1] - h[0][1] * h[1][0];
+            if det.abs() < 1e-12 {
+                break;
+            }
+            let da = (h[1][1] * g[0] - h[0][1] * g[1]) / det;
+            let db = (-h[1][0] * g[0] + h[0][0] * g[1]) / det;
+            a -= da;
+            b -= db;
+            if da.abs() + db.abs() < 1e-6 {
+                break;
+            }
+        }
+        println!("\n[{}] 選ぶ期間で当てはめた重み: 市場 α = {:.3} / モデル β = {:.3}", TYPES[t].0, a, b);
+        // 判定 1: 確かめる期間の対数損失
+        let (mut lmix, mut lmod, mut lmkt) = (Vec::new(), Vec::new(), Vec::new());
+        for &r in &conf {
+            let v = combos(t, r);
+            if let (Some(x), Some(y), Some(z)) = (race_loss(&v, a, b), race_loss(&v, 0.0, 1.0), race_loss(&v, 1.0, 0.0)) {
+                lmix.push(x);
+                lmod.push(y);
+                lmkt.push(z);
+            }
+        }
+        let avg = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+        println!("  確かめる期間 {} レース: 混ぜた {:.4} / モデルだけ {:.4} / 市場だけ {:.4}", lmix.len(), avg(&lmix), avg(&lmod), avg(&lmkt));
+        let (m, lo, hi) = paired_ci(&lmix, &lmod);
+        println!("  [判定 1] 混ぜた − モデルだけ: {:+.4} [{:+.4}, {:+.4}]{}", m, lo, hi, if hi < 0.0 { "  ← 確かに良い（アプリに入れる）" } else { "  （入れない）" });
+        let (m, lo, hi) = paired_ci(&lmix, &lmkt);
+        println!("  [参考] 混ぜた − 市場だけ: {:+.4} [{:+.4}, {:+.4}]", m, lo, hi);
+        // 判定 2 の候補（混ぜた確率 × 確定オッズ ≥ 1.0）
+        for r in 0..races.len() {
+            let v = combos(t, r);
+            let p = probs(&v, a, b, TYPES[t].1);
+            let (y, i, _) = &races[r];
+            let seg = if classes[*i] < 3.5 { 0 } else if classes[*i] < 4.9 { 1 } else { 2 };
+            for (c, q) in v.iter().zip(&p) {
+                if q * c.2 >= 1.0 {
+                    cands.push((*y, *i, seg, t, q * c.2, c.3));
+                }
+            }
+        }
+    }
+    // 判定 2: 従来の買い方の検証と同じ手順
+    let race_ci = |v: &[&Cand]| -> (f64, f64, f64, usize) {
+        let mut by: HashMap<usize, (f64, f64)> = HashMap::new();
+        for c in v {
+            let e = by.entry(c.1).or_default();
+            e.0 += 100.0;
+            e.1 += c.5;
+        }
+        let rs: Vec<(f64, f64)> = by.into_values().collect();
+        let (b, r) = rs.iter().fold((0.0, 0.0), |a, x| (a.0 + x.0, a.1 + x.1));
+        let mut seed: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+        let mut bs: Vec<f64> = (0..2000).map(|_| {
+            let (mut bb, mut rr) = (0.0, 0.0);
+            for _ in 0..rs.len() { let x = rs[(next() % rs.len() as u64) as usize]; bb += x.0; rr += x.1; }
+            rr / bb.max(1.0) * 100.0
+        }).collect();
+        bs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (r / b.max(1.0) * 100.0, bs[50], bs[1949], rs.len())
+    };
+    println!("\n[判定 2: ルールを選ぶ（2016〜2021 年）]");
+    let mut rule: [Option<f64>; 3] = [None; 3];
+    for t in 0..3 {
+        let mut best: Option<(f64, f64, f64)> = None;
+        for th in THRESHOLDS {
+            let v: Vec<&Cand> = cands.iter().filter(|c| c.0 <= 2021 && c.3 == t && c.4 >= th).collect();
+            if v.is_empty() { continue; }
+            let (roi, lo, hi, nr) = race_ci(&v);
+            println!("  {:<4} 期待値 ≥ {:.1}: {:>7} 点 {:>5} レース 回収率 {:>6.1}% [{:.0}%, {:.0}%]", TYPES[t].0, th, v.len(), nr, roi, lo, hi);
+            if v.len() >= 300 && best.map(|b| roi > b.1).unwrap_or(true) {
+                best = Some((th, roi, hi));
+            }
+        }
+        rule[t] = match best {
+            Some((th, _, hi)) if hi >= 100.0 => Some(th),
+            _ => None,
+        };
+        println!("  → {}: {}", TYPES[t].0, rule[t].map(|th| format!("期待値 ≥ {:.1} で買う", th)).unwrap_or("買わない".into()));
+    }
+    println!("\n[判定 2: 確かめる（2022〜2025 年、選んだルールのまま）]");
+    let chosen: Vec<&Cand> = cands.iter().filter(|c| c.0 >= 2022 && rule[c.3].map(|th| c.4 >= th).unwrap_or(false)).collect();
+    if chosen.is_empty() {
+        println!("  買う券種がありません（どの券種も選ぶ期間で条件を満たさなかった）");
+        return;
+    }
+    let (roi, lo, hi, nr) = race_ci(&chosen);
+    println!("  全体: {} 点 / {} レース / 回収率 {:.1}% [{:.0}%, {:.0}%]", chosen.len(), nr, roi, lo, hi);
+    for t in 0..3 {
+        let v: Vec<&Cand> = chosen.iter().copied().filter(|c| c.3 == t).collect();
+        if v.is_empty() { continue; }
+        let (roi, lo, hi, nr) = race_ci(&v);
+        println!("  {:<4} {:>6} 点 {:>5} レース 回収率 {:.1}% [{:.0}%, {:.0}%]", TYPES[t].0, v.len(), nr, roi, lo, hi);
+    }
+    let verdict = if lo > 100.0 { "利益が出ると言える" } else if lo > 85.0 { "今の買い目（82〜84%）より良いと言える" } else { "今の買い目より良いとは言えない" };
+    println!("  判定: {}", verdict);
 }
