@@ -48,6 +48,17 @@ internal static class JvDump
         {
             return 1;
         }
+        // 画面を出さずに利用キーを設定する（CI 用）。キーそのものは表示しない
+        string key = Environment.GetEnvironmentVariable("JRAVAN_KEY");
+        if (!string.IsNullOrEmpty(key))
+        {
+            rc = jv.JVSetServiceKey(key);
+            Console.WriteLine("JVSetServiceKey=" + rc);
+            if (rc != 0)
+            {
+                return 1;
+            }
+        }
 
         string mode = args[0].ToLowerInvariant();
         if (mode == "setup")
