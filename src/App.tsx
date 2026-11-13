@@ -60,15 +60,34 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [now, setNow] = useState(() => new Date());
 
+  const [toastShown, setToastShown] = useState(false);
+  const toastMsg = useRef<string | null>(null);
   const showToast = (msg: string) => {
+    toastMsg.current = msg;
     setToast(msg);
-    window.setTimeout(() => setToast((cur) => (cur === msg ? null : cur)), 3500);
+    // 一度 false で描画してから true にして、入りの transition を走らせる
+    setToastShown(false);
+    requestAnimationFrame(() => requestAnimationFrame(() => setToastShown(true)));
+    window.setTimeout(() => {
+      if (toastMsg.current !== msg) return;
+      setToastShown(false);
+      window.setTimeout(() => setToast((cur) => (toastMsg.current === msg ? null : cur)), 220);
+    }, 3500);
   };
 
   useEffect(() => {
     refreshDashboard();
     refreshJvStatus();
     loadCalendar(undefined, false);
+    // DB の更新までの成績を netkeiba から補う（裏で静かに。補ったときだけ知らせる）
+    invoke<number>("sync_recent_results")
+      .then((n) => {
+        if (n > 0) {
+          showToast(`最近の成績を ${n} レース分補いました`);
+          refreshJvStatus();
+        }
+      })
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -137,7 +156,7 @@ export default function App() {
     if (!q) return;
     setRaceInput(q);
     setBusy(true);
-    setBusyText("netkeibaから出馬表・過去5走・オッズを取得しています");
+    setBusyText("出馬表とオッズを取得中");
     setError(null);
     try {
       const res = await invoke<RacePredictionResult>("analyze_race", { input: q, weights, budget, strategy });
@@ -223,7 +242,7 @@ export default function App() {
       showToast(
         saved.pre_race
           ? `${saved.race_info.race_name} の予想を保存しました`
-          : `${saved.race_info.race_name} を保存しました（確定後の予想なので回収率には含めません）`,
+          : `${saved.race_info.race_name} を保存しました（集計外）`,
       );
     } catch (e) {
       setError(String(e));
@@ -299,7 +318,6 @@ export default function App() {
               }`
         }
       >
-        {bottom && <span className={`h-0.5 w-8 rounded-full ${on ? "bg-shell" : "bg-transparent"}`} aria-hidden />}
         <span>
           {t.label}
           {t.id === "bets" && prediction && (
@@ -350,7 +368,7 @@ export default function App() {
         </div>
         {busy && busyText && (
           <div className="h-0.5 overflow-hidden bg-shell-deep" role="progressbar" aria-label={busyText}>
-            <div className="h-full w-1/3 animate-[progress_1.2s_ease-in-out_infinite] bg-waku-5" />
+            <div className="h-full w-1/3 progress-bar bg-waku-5" />
           </div>
         )}
       </header>
@@ -436,13 +454,24 @@ export default function App() {
         aria-label="画面"
         className="fixed inset-x-0 bottom-0 z-30 flex border-t border-line bg-paper pb-[env(safe-area-inset-bottom)] md:hidden"
       >
+        <span
+          aria-hidden
+          className="tab-indicator pointer-events-none absolute left-0 top-0 flex justify-center"
+          style={{
+            width: `${100 / TABS.length}%`,
+            transform: `translateX(${Math.max(0, TABS.findIndex((t) => t.id === tab)) * 100}%)`,
+          }}
+        >
+          <span className="h-0.5 w-8 rounded-full bg-shell" />
+        </span>
         {TABS.map((t) => renderTab(t, true))}
       </nav>
 
       {toast && (
         <div
           role="status"
-          className="fixed bottom-5 right-5 z-40 rounded-md bg-ink px-4 py-2.5 text-[13px] text-white shadow-[0_6px_20px_rgba(22,24,29,0.25)]"
+          data-shown={toastShown}
+          className="toast fixed bottom-5 right-5 z-40 max-md:inset-x-4 max-md:bottom-[calc(68px+env(safe-area-inset-bottom))] max-md:text-center rounded-md bg-ink px-4 py-2.5 text-[13px] text-white shadow-[0_6px_20px_rgba(22,24,29,0.25)]"
         >
           {toast}
         </div>

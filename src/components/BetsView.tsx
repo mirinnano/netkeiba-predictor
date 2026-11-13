@@ -7,7 +7,6 @@ export function BetsView({ result }: { result: RacePredictionResult }) {
   const info = result.race_info;
   const wakuOf = (u: number) => result.predictions.find((p) => p.entry.umaban === u)?.entry.waku ?? 1;
   const recs = result.recommendations.filter((r) => r.suggested_amount > 0);
-  const anyEstimated = recs.some((r) => r.odds_is_estimated);
 
   return (
     <div className="space-y-4">
@@ -90,19 +89,13 @@ export function BetsView({ result }: { result: RacePredictionResult }) {
             </tfoot>
           </table>
           </div>
-          <p className="mt-4 max-w-[72ch] text-[12px] leading-relaxed text-ink-muted">
-            的中率は、過去走・スピード指数・騎手・父の成績から当てはめた勝率をもとに、2・3着の偏りを補正した Harville モデルで計算しています。
-            2023〜2025年のJRA 1518レースでの検証では、勝率の当たり具合は単勝オッズ（市場）の方が上でした。期待値が1を超える買い目も、モデルと市場の意見の差であって、勝てる保証ではありません。
-            {anyEstimated &&
-              "「推定」のオッズは実オッズが取れなかった券種で、単勝オッズから同じモデルで推定した値です。期待値の判断には実オッズを使ってください。"}
-          </p>
         </section>
 
         <aside className="rounded-lg border border-line bg-paper">
           <h2 className="border-b border-line px-4 py-2.5 text-[14px] font-black">確定払戻</h2>
           {result.official_payouts.length === 0 ? (
             <p className="px-4 py-6 text-[12px] text-ink-muted">
-              レースが確定すると、ここに払戻金が表示されます。保存した予想は「回収率」画面の「結果照合」で採点できます。
+              確定後に表示します
             </p>
           ) : (
             <ul>

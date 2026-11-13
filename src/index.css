@@ -51,13 +51,10 @@
   background: #a8a498;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
-  }
+/* 動き。どれも「状態が変わった」ことを伝えるためだけに使う */
+:root {
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
 }
 
 @keyframes progress {
@@ -66,6 +63,91 @@
   }
   to {
     transform: translateX(300%);
+  }
+}
+
+.progress-bar {
+  animation: progress 1.2s linear infinite;
+}
+
+/* オッズ更新で値が変わったセル: 背景を一瞬だけ黄色にして戻す（色だけなので動きを減らす設定でも残す） */
+@keyframes value-flash {
+  from {
+    background-color: rgba(242, 194, 0, 0.45);
+  }
+  to {
+    background-color: rgba(242, 194, 0, 0);
+  }
+}
+.value-flash {
+  border-radius: 3px;
+  animation: value-flash 1200ms var(--ease-out);
+}
+
+/* おすすめが出た・変わったとき */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.rise-in {
+  animation: rise-in 220ms var(--ease-out);
+}
+
+/* 自動更新中の印 */
+@keyframes live {
+  50% {
+    opacity: 0.3;
+  }
+}
+.live-dot {
+  animation: live 2s ease-in-out infinite;
+}
+
+/* トースト: 下から入って下へ出る。連続で出ても途中から戻れるよう transition で書く */
+.toast {
+  transition:
+    opacity 200ms var(--ease-out),
+    transform 200ms var(--ease-out);
+}
+.toast[data-shown="false"] {
+  opacity: 0;
+  transform: translateY(12px);
+  pointer-events: none;
+}
+
+/* 下のタブの位置を示す線 */
+.tab-indicator {
+  transition: transform 240ms var(--ease-in-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise-in {
+    animation-name: fade-in;
+  }
+  .toast[data-shown="false"] {
+    transform: none;
+  }
+  .tab-indicator {
+    transition: none;
+  }
+  .live-dot {
+    animation: none;
+  }
+  .progress-bar {
+    animation: fade-pulse 1.2s ease infinite;
+    transform: translateX(100%);
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes fade-pulse {
+  50% {
+    opacity: 0.4;
   }
 }
 

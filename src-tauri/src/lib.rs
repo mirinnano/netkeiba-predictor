@@ -144,6 +144,44 @@ fn jv_status(app: tauri::AppHandle) -> jvapp::JvStatus {
     jvapp::status(db.as_deref())
 }
 
+/// DB の成績の最終日の翌日から昨日までの中央の成績を netkeiba から補う（最大 21 日前まで、1 秒に 1 件）。
+/// JRA-VAN の確定成績が後で取り込まれれば、そちらで上書きされる。補ったレース数を返す
+#[tauri::command]
+async fn sync_recent_results(app: tauri::AppHandle) -> Result<u32, String> {
+    let Some(db) = app.path().app_data_dir().ok().and_then(|d| jvapp::db_path(&d)) else { return Ok(0) };
+    let last = {
+        let conn = jvstore::open(&db).map_err(|e| e.to_string())?;
+        jvstore::last_result_date(&conn).map_err(|e| e.to_string())?.unwrap_or_default()
+    };
+    let today = chrono::Local::now().date_naive();
+    let floor = today - chrono::Duration::days(21);
+    let start = chrono::NaiveDate::parse_from_str(&last, "%Y%m%d").map(|d| d + chrono::Duration::days(1)).unwrap_or(floor).max(floor);
+    let client = scraper::build_client()?;
+    let mut added = 0u32;
+    let mut day = start;
+    while day < today {
+        let ds = day.format("%Y%m%d").to_string();
+        let list = scraper::fetch_race_list(&ds, false).await.unwrap_or_default();
+        for r in list.iter().flat_map(|v| v.races.iter()) {
+            let have = {
+                let conn = jvstore::open(&db).map_err(|e| e.to_string())?;
+                jvstore::race_by_id(&conn, &r.race_id).ok().flatten().map(|x| x.kubun == '7').unwrap_or(false)
+            };
+            if have {
+                continue;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            if let Some(race) = scraper::fetch_result_as_jvrace(&client, &r.race_id, &ds).await {
+                let mut conn = jvstore::open(&db).map_err(|e| e.to_string())?;
+                jvstore::store_netkeiba_race(&mut conn, &race).map_err(|e| e.to_string())?;
+                added += 1;
+            }
+        }
+        day += chrono::Duration::days(1);
+    }
+    Ok(added)
+}
+
 /// 締め切り前などに、オッズだけを取り直して勝率・期待値・買い目を作り直す（出馬表と過去走は取り直さない）。
 /// JRA-VAN モデルの勝率は単勝オッズを使うので、計算し直す（Engine は使い回すので速い）
 #[tauri::command]
@@ -314,6 +352,7 @@ pub fn run() {
             analyze_race,
             recalculate_prediction,
             refresh_odds,
+            sync_recent_results,
             save_prediction_record,
             load_prediction_record,
             delete_prediction_record,

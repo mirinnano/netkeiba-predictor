@@ -94,8 +94,19 @@ export function TodayView({ onPickRace, onOpenBrowser }: { onPickRace: (raceId: 
             </div>
           </div>
           <div className="shrink-0 text-right">
-            <div className="num text-[34px] font-bold leading-none">{mins}</div>
-            <div className="text-[11px] text-shell-text">分後</div>
+            {mins !== null && mins >= 60 ? (
+              <div className="num text-[30px] font-bold leading-none">
+                {Math.floor(mins / 60)}
+                <span className="text-[14px] font-normal text-shell-text">時間</span>
+                {mins % 60}
+                <span className="text-[14px] font-normal text-shell-text">分後</span>
+              </div>
+            ) : (
+              <div className="num text-[34px] font-bold leading-none">
+                {mins}
+                <span className="text-[14px] font-normal text-shell-text">分後</span>
+              </div>
+            )}
           </div>
         </button>
       )}

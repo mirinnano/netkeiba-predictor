@@ -84,7 +84,7 @@ export function RaceView({
           }`}
           title={
             result.model_source === "jravan"
-              ? "勝率は JRA-VAN の履歴（2021〜2025年）で当てはめたモデル。オッズがあれば市場の勝率と組み合わせる"
+              ? "JRA-VAN の過去成績（2012〜2025年）で当てはめたモデル。単勝オッズと組み合わせて勝率を出す"
               : "JRA-VAN のデータベースがないため、従来の5項目モデルで計算しています"
           }
         >
@@ -143,7 +143,12 @@ export function RaceView({
                 発走まで <span className="num text-[15px] font-bold text-ink">{minutesToPost}</span> 分
               </span>
             )}
-            {autoRefresh && <span className="font-bold text-shell">発走20分前から2分ごとに自動更新</span>}
+            {autoRefresh && (
+              <span className="flex items-center gap-1.5 font-bold text-shell">
+                <span className="live-dot h-2 w-2 rounded-full bg-shell" aria-hidden />
+                自動更新中
+              </span>
+            )}
           </div>
           <button
             type="button"
@@ -226,6 +231,7 @@ export function RaceView({
 
           <div className="max-md:relative max-md:-mx-4 max-md:overflow-x-auto max-md:px-4">
           <EntryTable
+            key={info.race_id}
             rows={rows}
             finished={info.is_finished}
             tickets={tickets}
@@ -240,6 +246,7 @@ export function RaceView({
 
         <div className="sticky top-[72px] max-md:static max-md:order-first">
           <TicketPanel
+            key={info.race_id}
             result={result}
             wakuOf={(u) => wakuMap.get(u) ?? 1}
             budget={budget}

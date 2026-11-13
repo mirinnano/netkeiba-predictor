@@ -194,8 +194,28 @@ fn parse_work_any(rec: &[u8]) -> Option<JvWork> {
     parse_work(&r)
 }
 
+/// データ区分 'N' は netkeiba から補った確定成績。区分 7（確定）として読むが、順位を 6 にして JRA-VAN の確定成績で上書きされるようにする
+fn stored_kubun(k: char) -> (String, i64) {
+    if k == 'N' {
+        ("7".into(), 6)
+    } else {
+        (k.to_string(), kubun_rank(k as u8).unwrap_or(0) as i64)
+    }
+}
+
+/// netkeiba から作ったレース（kubun 'N'）を保存する。すでに JRA-VAN の確定成績があれば何もしない
+pub fn store_netkeiba_race(conn: &mut Connection, r: &JvRace) -> rusqlite::Result<()> {
+    let key = format!("{}{}", r.date, &r.race_id[4..12]);
+    let tx = conn.transaction()?;
+    upsert_race(&tx, &key, r)?;
+    for h in &r.runners {
+        upsert_runner(&tx, &key, h)?;
+    }
+    tx.commit()
+}
+
 fn upsert_race(tx: &rusqlite::Transaction, key: &str, r: &JvRace) -> rusqlite::Result<()> {
-    let rank = kubun_rank(r.kubun as u8).unwrap_or(0) as i64;
+    let (kubun, rank) = stored_kubun(r.kubun);
     tx.prepare_cached(
         "INSERT INTO races (race_key, race_id, date, kubun, kubun_rank, venue_code, race_name, grade, race_type, condition_min,
             distance, track_code, surface, start_time, runners_count, weather, turf_cond, dirt_cond, laps, first3f, last3f)
@@ -213,7 +233,7 @@ fn upsert_race(tx: &rusqlite::Transaction, key: &str, r: &JvRace) -> rusqlite::R
         key,
         r.race_id,
         r.date,
-        r.kubun.to_string(),
+        kubun,
         rank,
         r.venue_code,
         r.race_name,
@@ -236,7 +256,7 @@ fn upsert_race(tx: &rusqlite::Transaction, key: &str, r: &JvRace) -> rusqlite::R
 }
 
 fn upsert_runner(tx: &rusqlite::Transaction, key: &str, h: &JvRunner) -> rusqlite::Result<()> {
-    let rank = kubun_rank(h.kubun as u8).unwrap_or(0) as i64;
+    let (kubun, rank) = stored_kubun(h.kubun);
     tx.prepare_cached(
         "INSERT INTO runners (race_key, horse_id, kubun, kubun_rank, waku, umaban, name, sex, age, trainer, owner,
             carried_weight, blinker, jockey, jockey_name, apprentice, body_weight, weight_diff, abnormal, rank, time_sec,
@@ -260,7 +280,7 @@ fn upsert_runner(tx: &rusqlite::Transaction, key: &str, h: &JvRunner) -> rusqlit
     .execute(params![
         key,
         h.horse_id,
-        h.kubun.to_string(),
+        kubun,
         rank,
         h.waku as i64,
         h.umaban as i64,

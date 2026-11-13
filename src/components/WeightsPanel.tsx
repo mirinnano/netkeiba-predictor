@@ -20,11 +20,7 @@ export function FactorShares({ shares, model }: { shares: FactorShare[]; model?:
     <div className="rounded-lg border border-line bg-paper px-4 py-3">
       <div className="mb-2 flex flex-wrap items-baseline gap-x-3 text-[12px]">
         <span className="font-bold">指数の内訳（自動）</span>
-        <span className="text-ink-muted">
-          {model === "jravan"
-            ? "2021〜2025年の JRA 16,650 レースで当てはめた係数から、このレースでの各要素の効き方を出しています。"
-            : "過去のレースで当てはめた係数から、このレースでの各要素の効き方を出しています。"}
-        </span>
+
       </div>
       <ul className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5">
         {shares.map((s) => (

@@ -33,8 +33,7 @@ export function JvDataPanel({
           </span>
         ) : (
           <span className="text-[12px] text-ink-muted">
-            まだありません。取り込むと、勝率を JRA-VAN の履歴で当てはめたモデルで計算します。
-            <span className="md:hidden">スマホでは、Mac で作ったデータを転送して入れます（tools/mobile_db.sh）。</span>
+            まだ取り込んでいません
           </span>
         )}
       </div>

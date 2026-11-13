@@ -1695,3 +1695,248 @@ pub async fn fetch_horse_results(horse_id: &str) -> Result<Vec<HorseRun>, String
     let html = fetch_html(&client, &url).await?;
     Ok(parse_horse_results(&html))
 }
+
+// ---- netkeiba の結果ページから JRA-VAN と同じ形のレースを作る（DB の更新までの成績を補うため） ----
+
+/// 全角数字を半角に
+fn ascii_digits(s: &str) -> String {
+    s.chars()
+        .map(|c| if ('０'..='９').contains(&c) { char::from_u32(c as u32 - '０' as u32 + '0' as u32).unwrap() } else { c })
+        .collect()
+}
+
+/// "1:59.0" / "59.0" → 秒
+fn time_to_sec(s: &str) -> Option<f64> {
+    let s = s.trim();
+    match s.split_once(':') {
+        Some((m, r)) => Some(m.parse::<f64>().ok()? * 60.0 + r.parse::<f64>().ok()?),
+        None => s.parse().ok(),
+    }
+}
+
+/// netkeiba のコース表記から JRA-VAN のトラックコード（主なものだけ。2 周・内→外などは近いものに寄せる）
+fn track_code_of(surface: &str, txt: &str) -> i64 {
+    let outer = txt.contains('外');
+    let straight = txt.contains("直線");
+    match (surface, straight, txt.contains('左'), outer) {
+        ("芝", true, _, _) => 10,
+        ("芝", _, true, false) => 11,
+        ("芝", _, true, true) => 12,
+        ("芝", _, false, false) => 17,
+        ("芝", _, false, true) => 18,
+        ("ダ", true, _, _) => 29,
+        ("ダ", _, true, _) => 23,
+        ("ダ", _, false, _) => 24,
+        _ => 0,
+    }
+}
+
+/// クラス表記 → 競走条件コード（新馬・未勝利 703、1勝 005、2勝 010、3勝 016、オープン 999）
+fn condition_code_of(txt: &str) -> String {
+    let t = ascii_digits(txt);
+    if t.contains("新馬") || t.contains("未勝利") {
+        "703"
+    } else if t.contains("1勝") || t.contains("500万") {
+        "005"
+    } else if t.contains("2勝") || t.contains("1000万") {
+        "010"
+    } else if t.contains("3勝") || t.contains("1600万") {
+        "016"
+    } else {
+        "999"
+    }
+    .to_string()
+}
+
+fn going_code(txt: &str) -> String {
+    if txt.contains("不良") {
+        "4"
+    } else if txt.contains("稍") {
+        "2"
+    } else if txt.contains('重') {
+        "3"
+    } else if txt.contains('良') {
+        "1"
+    } else {
+        ""
+    }
+    .to_string()
+}
+
+/// netkeiba の結果ページ（確定後）を JvRace にする。データ区分は 'N'（JRA-VAN の確定成績が来たら上書きされる）
+pub async fn fetch_result_as_jvrace(client: &reqwest::Client, race_id: &str, date: &str) -> Option<crate::jvdata::JvRace> {
+    let url = format!("https://race.netkeiba.com/race/result.html?race_id={}", race_id);
+    let html = fetch_html(client, &url).await.ok()?;
+    parse_result_as_jvrace(&html, race_id, date)
+}
+
+pub fn parse_result_as_jvrace(html: &str, race_id: &str, date: &str) -> Option<crate::jvdata::JvRace> {
+    use crate::jvdata::{JvRace, JvRunner};
+    let doc = Html::parse_document(html);
+    let text_of = |sel: &str| -> String {
+        let s = Selector::parse(sel).unwrap();
+        doc.select(&s).next().map(|e| clean_text(&e.text().collect::<String>())).unwrap_or_default()
+    };
+    let d1 = text_of(".RaceData01");
+    let d2 = text_of(".RaceData02");
+    let surface = detect_surface(&d1);
+    if surface == "障" || d1.is_empty() {
+        return None;
+    }
+    let distance: u32 = Regex::new(r"(\d{3,4})m").unwrap().captures(&d1).and_then(|c| c[1].parse().ok())?;
+    let start_time = Regex::new(r"(\d{1,2}):(\d{2})").unwrap().captures(&d1).map(|c| format!("{:0>2}{}", &c[1], &c[2])).unwrap_or_default();
+    // 馬場状態は .RaceData01 の .Item03（芝）か .Item04（ダート）。後ろに風の注記が続くことがある
+    let going = going_code(&format!("{} {}", text_of(".RaceData01 .Item03"), text_of(".RaceData01 .Item04")));
+    let debut = ascii_digits(&d2).contains("新馬");
+    let course_txt = d1.split('/').nth(1).unwrap_or("");
+    let head: String = html.find("RaceName").map(|i| html[i..].chars().take(3000).collect()).unwrap_or_default();
+    let grade = match parse_grade_from_classes(&head).as_deref() {
+        Some("GI") => "A",
+        Some("GII") => "B",
+        Some("GIII") => "C",
+        Some("L") => "L",
+        _ => "",
+    };
+
+    // ラップ: 1 行目が通過タイム（累計）、見出しが距離
+    let th_sel = Selector::parse("table.Race_HaronTime tr.Header th").unwrap();
+    let cum_sel = Selector::parse("table.Race_HaronTime tr.HaronTime").unwrap();
+    let td_sel = Selector::parse("td").unwrap();
+    let marks: Vec<u32> = doc.select(&th_sel).filter_map(|e| clean_text(&e.text().collect::<String>()).trim_end_matches('m').parse().ok()).collect();
+    let rows_t: Vec<Vec<String>> = doc.select(&cum_sel).map(|tr| tr.select(&td_sel).map(|e| clean_text(&e.text().collect::<String>())).collect()).collect();
+    let cum: Vec<Option<f64>> = rows_t.first().map(|r| r.iter().map(|x| time_to_sec(x)).collect()).unwrap_or_default();
+    let laps: Vec<f64> = rows_t.get(1).map(|r| r.iter().filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
+    let at = |m: u32| marks.iter().position(|x| *x == m).and_then(|i| cum.get(i).copied().flatten());
+    // 前 3F は最初の 3 区間の合計（JRA-VAN と同じ。端数の距離は最初の区間が短い）
+    let first3f = if laps.len() >= 3 { Some(((laps[0] + laps[1] + laps[2]) * 10.0).round() / 10.0) } else { None };
+    let last3f = match (at(distance), at(distance.saturating_sub(600))) {
+        (Some(t), Some(b)) => Some(((t - b) * 10.0).round() / 10.0),
+        _ => None,
+    };
+
+    // 各馬
+    let tr_sel = Selector::parse("#All_Result_Table tr.HorseList, table.RaceTable01 tr.HorseList").unwrap();
+    let a_sel = Selector::parse("a").unwrap();
+    let td_any = Selector::parse("td").unwrap();
+    let mut runners: Vec<JvRunner> = Vec::new();
+    for tr in doc.select(&tr_sel) {
+        let tds: Vec<_> = tr.select(&td_any).collect();
+        let cell = |cls: &str| -> String {
+            tds.iter()
+                .find(|e| e.value().attr("class").map(|c| c.split_whitespace().any(|x| x == cls)).unwrap_or(false))
+                .map(|e| clean_text(&e.text().collect::<String>()))
+                .unwrap_or_default()
+        };
+        let link_id = |kind: &str| -> String {
+            tr.select(&a_sel)
+                .filter_map(|a| a.value().attr("href"))
+                .find(|h| h.contains(&format!("/{}/", kind)))
+                .and_then(|h| h.trim_end_matches('/').rsplit('/').next().map(|s| s.to_string()))
+                .unwrap_or_default()
+        };
+        let rank_txt = cell("Result_Num");
+        let (rank, abnormal) = match rank_txt.parse::<u32>() {
+            Ok(r) => (Some(r), "0".to_string()),
+            Err(_) if rank_txt.contains("取") => (None, "1".to_string()),
+            Err(_) if rank_txt.contains("除") => (None, "2".to_string()),
+            Err(_) => (None, "4".to_string()),
+        };
+        let umaban: u32 = tds.iter().filter(|e| e.value().attr("class").map(|c| c.contains("Num") && c.contains("Txt_C")).unwrap_or(false)).find_map(|e| clean_text(&e.text().collect::<String>()).parse().ok()).unwrap_or(0);
+        let waku: u32 = tds.iter().find(|e| e.value().attr("class").map(|c| c.contains("Waku")).unwrap_or(false)).and_then(|e| clean_text(&e.text().collect::<String>()).parse().ok()).unwrap_or(0);
+        let horse_id = link_id("horse");
+        if horse_id.is_empty() || umaban == 0 {
+            continue;
+        }
+        let sex_age = tds.iter().find(|e| e.value().attr("class") == Some("Horse_Info Txt_C")).map(|e| clean_text(&e.text().collect::<String>())).unwrap_or_default();
+        let sex = match sex_age.chars().next() {
+            Some('牡') => "1",
+            Some('牝') => "2",
+            _ => "3",
+        };
+        let age: u32 = sex_age.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
+        let passage: Vec<u32> = cell("PassageRate").split('-').filter_map(|x| x.trim().parse().ok()).collect();
+        let mut corners = [None; 4];
+        for (i, p) in passage.iter().rev().enumerate().take(4) {
+            corners[3 - i] = Some(*p);
+        }
+        let weight_txt = cell("Weight");
+        let wcap = Regex::new(r"(\d+)\(([+-]?\d+)\)").unwrap().captures(&weight_txt);
+        let times: Vec<String> = tds.iter().filter(|e| e.value().attr("class").map(|c| c.split_whitespace().next() == Some("Time")).unwrap_or(false)).map(|e| clean_text(&e.text().collect::<String>())).collect();
+        let last3f_h = times.iter().filter_map(|t| t.parse::<f64>().ok()).find(|v| (30.0..45.0).contains(v));
+        runners.push(JvRunner {
+            kubun: 'N',
+            waku,
+            umaban,
+            horse_id,
+            name: tr.select(&a_sel).find(|a| a.value().attr("href").map(|h| h.contains("/horse/")).unwrap_or(false)).map(|a| clean_text(&a.text().collect::<String>())).unwrap_or_default(),
+            sex: sex.into(),
+            age,
+            trainer: link_id("trainer"),
+            owner: String::new(),
+            carried_weight: cell("Jockey_Info").parse().ok(),
+            blinker: false,
+            jockey: link_id("jockey"),
+            jockey_name: cell("Jockey"),
+            apprentice: String::new(),
+            body_weight: wcap.as_ref().and_then(|c| c[1].parse().ok()),
+            // 新馬戦は前走がないので増減なし（JRA-VAN も空）
+            weight_diff: if debut { None } else { wcap.as_ref().and_then(|c| c[2].parse().ok()) },
+            abnormal,
+            rank,
+            time_sec: times.first().and_then(|t| time_to_sec(t)).filter(|v| *v > 40.0),
+            corners,
+            win_odds: tds.iter().find(|e| e.value().attr("class").map(|c| c.contains("Odds") && c.contains("Txt_R")).unwrap_or(false)).and_then(|e| clean_text(&e.text().collect::<String>()).parse().ok()),
+            popularity: tds.iter().find(|e| e.value().attr("class").map(|c| c.contains("Odds") && c.contains("Txt_C")).unwrap_or(false)).and_then(|e| clean_text(&e.text().collect::<String>()).parse().ok()),
+            last3f: last3f_h,
+            last4f: None,
+            time_diff: None,
+            mining_kubun: String::new(),
+            mining_time: None,
+            mining_rank: None,
+            style: 0,
+        });
+    }
+    if runners.is_empty() {
+        return None;
+    }
+    // 1 着とのタイム差（1 着は 2 着との差を負で）、脚質（最初のコーナーの位置）
+    let n = runners.iter().filter(|h| h.rank.is_some()).count().max(1) as f64;
+    let t_of = |k: u32| runners.iter().find(|h| h.rank == Some(k)).and_then(|h| h.time_sec);
+    let (t1, t2) = (t_of(1), t_of(2));
+    for h in runners.iter_mut() {
+        h.time_diff = match (h.rank, h.time_sec, t1, t2) {
+            (Some(1), Some(_), Some(a), Some(b)) => Some(((a - b) * 10.0).round() / 10.0),
+            (Some(_), Some(t), Some(a), _) => Some(((t - a) * 10.0).round() / 10.0),
+            _ => None,
+        };
+        h.style = match h.corners.iter().flatten().next() {
+            Some(1) => 1,
+            Some(p) if (*p as f64) / n <= 1.0 / 3.0 => 2,
+            Some(p) if (*p as f64) / n <= 2.0 / 3.0 => 3,
+            Some(_) => 4,
+            None => 0,
+        };
+    }
+    Some(JvRace {
+        race_id: race_id.to_string(),
+        date: date.to_string(),
+        kubun: 'N',
+        venue_code: race_id.get(4..6).unwrap_or("").to_string(),
+        race_name: text_of(".RaceName"),
+        grade: grade.into(),
+        race_type: String::new(),
+        condition_min: condition_code_of(&d2),
+        distance,
+        track_code: track_code_of(&surface, course_txt),
+        surface: surface.clone(),
+        start_time,
+        runners_count: runners.len() as u32,
+        weather: String::new(),
+        turf_cond: if surface == "芝" { going.clone() } else { "0".into() },
+        dirt_cond: if surface == "ダ" { going } else { "0".into() },
+        laps,
+        first3f,
+        last3f,
+        runners,
+    })
+}

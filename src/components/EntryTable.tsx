@@ -3,6 +3,7 @@ import { ChevronDown } from "lucide-react";
 import { HorsePrediction } from "../types";
 import { pct, runningStyle } from "../lib/format";
 import { Cloth } from "./Cloth";
+import { Flash } from "./Flash";
 
 // 各要素の寄与をレース内の偏差値にしたもの（50 が平均）。調教は JRA-VAN モデルのときだけ
 const BASE_KEYS: { key: keyof HorsePrediction; label: string }[] = [
@@ -143,7 +144,9 @@ export function EntryTable({
                 <td className="py-1.5 px-2 text-right whitespace-nowrap">
                   {e.win_odds ? (
                     <>
-                      <span className="num text-[16px] font-bold">{e.win_odds.toFixed(1)}</span>
+                      <Flash value={e.win_odds.toFixed(1)} className="num px-0.5 text-[16px] font-bold">
+                        {e.win_odds.toFixed(1)}
+                      </Flash>
                       {e.popularity && <span className="ml-1 text-[11px] text-ink-muted">{e.popularity}人気</span>}
                     </>
                   ) : (
@@ -152,12 +155,12 @@ export function EntryTable({
                 </td>
                 <td className="py-1.5 px-2 text-right">
                   {!e.is_scratched && (
-                    <span
-                      className={`num text-[16px] ${p.expected_value >= 1.2 ? "font-bold text-ink" : "text-ink-muted"}`}
-                      title={`妙味 ${p.value_rank}`}
+                    <Flash
+                      value={p.expected_value.toFixed(2)}
+                      className={`num px-0.5 text-[16px] ${p.expected_value >= 1.2 ? "font-bold text-ink" : "text-ink-muted"}`}
                     >
                       {p.expected_value.toFixed(2)}
-                    </span>
+                    </Flash>
                   )}
                 </td>
                 {finished && (
