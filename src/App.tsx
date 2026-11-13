@@ -458,7 +458,7 @@ export default function App() {
           {t.label}
           {t.id === "bets" && prediction && (
             <span className="num ml-1 text-[14px] opacity-70">
-              {prediction.recommendations.filter((r) => r.suggested_amount > 0).length}
+              {myTotals(prediction).bets.length}
             </span>
           )}
         </span>

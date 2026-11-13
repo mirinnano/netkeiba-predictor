@@ -2,16 +2,18 @@ import { RacePredictionResult } from "../types";
 import { pct, yen } from "../lib/format";
 import { Cloth } from "./Cloth";
 import { Odds } from "./TicketPanel";
+import { myTotals } from "./MyBets";
 
 export function BetsView({ result }: { result: RacePredictionResult }) {
   const info = result.race_info;
   const wakuOf = (u: number) => result.predictions.find((p) => p.entry.umaban === u)?.entry.waku ?? 1;
-  const recs = result.recommendations.filter((r) => r.suggested_amount > 0);
+  // 自分の馬券があればそれを、なければおすすめの買い目を出す
+  const { bets: recs, bet: totalBet, ret: totalReturn, own } = myTotals(result);
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-baseline gap-x-4">
-        <h1 className="text-[24px] font-black">買い目の内訳</h1>
+        <h1 className="text-[24px] font-black">{own ? "自分の馬券" : "買い目の内訳"}</h1>
         <span className="text-ink-muted">
           {info.venue}
           {info.race_num} {info.race_name}
@@ -49,14 +51,18 @@ export function BetsView({ result }: { result: RacePredictionResult }) {
                     <div>{r.horse_names.join(" ・ ")}</div>
                     <div className="text-[11px] text-ink-muted">{r.confidence}</div>
                   </td>
-                  <td className="py-2 pr-3 text-right num text-[15px]">{pct(r.est_hit_prob)}</td>
+                  <td className="py-2 pr-3 text-right num text-[15px]">{r.est_hit_prob > 0 ? pct(r.est_hit_prob) : "—"}</td>
                   <td className="py-2 pr-3 text-right">
-                    <Odds value={r.est_odds} estimated={r.odds_is_estimated} />
+                    {r.est_odds > 0 ? <Odds value={r.est_odds} estimated={r.odds_is_estimated} /> : <span className="text-ink-faint">—</span>}
                   </td>
                   <td className="py-2 pr-3 text-right">
-                    <span className={`num text-[16px] ${r.expected_value >= 1.2 ? "font-bold" : "text-ink-muted"}`}>
-                      {r.expected_value.toFixed(2)}
-                    </span>
+                    {r.expected_value > 0 ? (
+                      <span className={`num text-[16px] ${r.expected_value >= 1.2 ? "font-bold" : "text-ink-muted"}`}>
+                        {r.expected_value.toFixed(2)}
+                      </span>
+                    ) : (
+                      <span className="text-ink-faint">—</span>
+                    )}
                   </td>
                   <td className="py-2 pr-3 text-right num text-[17px] font-bold">{r.suggested_amount.toLocaleString()}</td>
                   {info.is_finished && (
@@ -78,11 +84,13 @@ export function BetsView({ result }: { result: RacePredictionResult }) {
                 <td colSpan={6} className="pt-3 text-right font-bold">
                   合計
                 </td>
-                <td className="pt-3 pr-3 text-right num text-[20px] font-bold">{yen(result.total_bet)}</td>
+                <td className="pt-3 pr-3 text-right num text-[20px] font-bold">{yen(totalBet)}</td>
                 {info.is_finished && (
                   <td className="pt-3 text-right num text-[18px] font-bold">
-                    {yen(result.total_return ?? 0)}
-                    <span className="ml-1 text-[13px] text-ink-muted">{result.roi_percent?.toFixed(1)}%</span>
+                    {yen(totalReturn)}
+                    <span className="ml-1 text-[13px] text-ink-muted">
+                      {totalBet > 0 ? ((totalReturn / totalBet) * 100).toFixed(1) : "0.0"}%
+                    </span>
                   </td>
                 )}
               </tr>
