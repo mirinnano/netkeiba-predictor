@@ -1,6 +1,7 @@
 import { Save } from "lucide-react";
 import { BetRecommendation, RacePredictionResult } from "../types";
 import { MyBets } from "./MyBets";
+import { TicketSetView } from "./TicketSetView";
 import { pct, yen } from "../lib/format";
 import { Flash } from "./Flash";
 import { Cloth } from "./Cloth";
@@ -103,7 +104,10 @@ export function TicketPanel({
         </button>
       </div>
       <div className="px-4 pt-3">
-        <MyBets result={result} wakuOf={wakuOf} onChange={onMyBets} />
+        <TicketSetView result={result} />
+        <div className="mt-2">
+          <MyBets result={result} wakuOf={wakuOf} onChange={onMyBets} />
+        </div>
       </div>
       <div className="space-y-2 px-4 pt-2">
         <Segmented label="配分の方針" value={strategy} options={STRATEGIES} onChange={onStrategy} />

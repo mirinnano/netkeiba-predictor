@@ -9,6 +9,7 @@ pub mod payout_watch;
 pub mod predictor;
 pub mod scraper;
 pub mod std_times;
+pub mod ticket_eval;
 
 use models::{
     HorseEntry, KaisaiCalendarResponse, RacePredictionResult, RoiDashboardStats, ScoringWeights,
@@ -343,6 +344,12 @@ async fn check_payouts(current_result: RacePredictionResult) -> Result<Option<Ra
     Ok(Some(predictor::apply_official_result(current_result, &rows, payouts)))
 }
 
+/// 買い目全体の評価（自分の馬券があればそちら）
+#[tauri::command]
+fn evaluate_tickets(current_result: RacePredictionResult) -> ticket_eval::TicketSetEval {
+    ticket_eval::evaluate(&current_result)
+}
+
 /// 後ろで見張っていたあいだに確定したレース。画面が前に戻ったら受け取って演出を出す
 #[tauri::command]
 fn take_pending_payouts(state: tauri::State<payout_watch::Pending>) -> Vec<RacePredictionResult> {
@@ -387,6 +394,7 @@ pub fn run() {
             verify_saved_race_result,
             check_payouts,
             take_pending_payouts,
+            evaluate_tickets,
             jv_status,
             jv_import,
         ])

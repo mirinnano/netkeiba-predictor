@@ -1510,7 +1510,7 @@ pub(crate) mod tests {
     }
 
     /// JRA-VAN モデルの勝率を渡したときの予想（勝率は馬番 1..6 の順）
-    fn jv_prediction(finished: bool) -> RacePredictionResult {
+    pub(crate) fn jv_prediction(finished: bool) -> RacePredictionResult {
         let probs = [0.30, 0.10, 0.10, 0.15, 0.20, 0.15];
         let jv = crate::models::JvModelOut {
             probs: probs.iter().enumerate().map(|(i, p)| (i as u32 + 1, *p)).collect(),
