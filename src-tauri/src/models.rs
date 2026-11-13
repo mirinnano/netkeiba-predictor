@@ -255,6 +255,12 @@ pub struct ComboOdds {
     pub wide: std::collections::HashMap<String, f64>,
     #[serde(default)]
     pub sanrenpuku: std::collections::HashMap<String, f64>,
+    /// 馬単。キーは着順どおりの馬番を "-" で連結したもの（例: "3-1"）
+    #[serde(default)]
+    pub umatan: std::collections::HashMap<String, f64>,
+    /// 3連単。キーは着順どおり（例: "3-1-7"）
+    #[serde(default)]
+    pub sanrentan: std::collections::HashMap<String, f64>,
 }
 
 pub fn combo_key(horses: &[u32]) -> String {

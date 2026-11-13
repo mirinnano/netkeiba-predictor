@@ -905,7 +905,7 @@ pub async fn fetch_race_result(
 /// JRA の組み合わせ馬券オッズ（馬連=4, ワイド=5, 3連複=7）。取れなかった券種は空のまま。
 pub async fn fetch_jra_combo_odds(client: &reqwest::Client, race_id: &str) -> ComboOdds {
     let mut combo = ComboOdds::default();
-    for (type_id, pair_len) in [("4", 2_usize), ("5", 2), ("7", 3)] {
+    for (type_id, pair_len) in [("4", 2_usize), ("5", 2), ("7", 3), ("6", 2), ("8", 3)] {
         let url = format!(
             "https://race.netkeiba.com/api/api_get_jra_odds.html?pid=api_get_jra_odds&input=UTF-8&output=json&race_id={}&type={}&action=init&compress=0",
             race_id, type_id
@@ -913,10 +913,14 @@ pub async fn fetch_jra_combo_odds(client: &reqwest::Client, race_id: &str) -> Co
         let Ok(text) = fetch_html(client, &url).await else {
             continue;
         };
-        let map = parse_combo_odds_json(&text, type_id, pair_len);
+        // 馬単(6)・3連単(8) は着順に意味があるので、キーを並べ替えない
+        let ordered = matches!(type_id, "6" | "8");
+        let map = parse_combo_odds_json(&text, type_id, pair_len, ordered);
         match type_id {
             "4" => combo.umaren = map,
             "5" => combo.wide = map,
+            "6" => combo.umatan = map,
+            "8" => combo.sanrentan = map,
             _ => combo.sanrenpuku = map,
         }
     }
@@ -924,10 +928,12 @@ pub async fn fetch_jra_combo_odds(client: &reqwest::Client, race_id: &str) -> Co
 }
 
 /// odds API の JSON から {"0102": ["12.3", ...]} 形式を読み、キーを "1-2" に直す。
+/// ordered が false なら馬番を昇順にそろえ、true なら着順どおりのまま（馬単・3連単）
 pub(crate) fn parse_combo_odds_json(
     text: &str,
     type_id: &str,
     horses: usize,
+    ordered: bool,
 ) -> HashMap<String, f64> {
     let mut out = HashMap::new();
     let Ok(json) = serde_json::from_str::<Value>(text) else {
@@ -956,7 +962,12 @@ pub(crate) fn parse_combo_odds_json(
             .and_then(|s| s.replace(',', "").parse::<f64>().ok())
             .filter(|&o| o > 0.0);
         if let Some(o) = odds {
-            out.insert(combo_key(&nums), o);
+            let key = if ordered {
+                nums.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("-")
+            } else {
+                combo_key(&nums)
+            };
+            out.insert(key, o);
         }
     }
     out
@@ -1584,7 +1595,7 @@ mod tests {
     #[test]
     fn combo_odds_json_is_keyed_by_sorted_umaban() {
         let json = r#"{"status":"result","data":{"odds":{"7":{"010203":["7.4","0.0","4"],"010205":["1,205.2","0.0","1"],"0102":["1.0","0","1"]}}}}"#;
-        let m = parse_combo_odds_json(json, "7", 3);
+        let m = parse_combo_odds_json(json, "7", 3, false);
         assert_eq!(m.get("1-2-3"), Some(&7.4));
         assert_eq!(m.get("1-2-5"), Some(&1205.2));
         assert_eq!(m.len(), 2);

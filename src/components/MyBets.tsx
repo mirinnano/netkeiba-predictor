@@ -128,8 +128,36 @@ export function MyBets({
         return co?.wide?.[key] ?? 0;
       case "3連複":
         return co?.sanrenpuku?.[key] ?? 0;
+      case "馬単":
+        return co?.umatan?.[horses.join("-")] ?? 0;
+      case "3連単":
+        return co?.sanrentan?.[horses.join("-")] ?? 0;
       default:
         return 0;
+    }
+  };
+
+  // 印（◎○▲☆△）の付いた馬を、印の強い順に
+  const MARK_ORDER = ["◎", "○", "▲", "☆", "△"];
+  const marked = result.predictions
+    .filter((p) => !p.entry.is_scratched && MARK_ORDER.includes(p.mark))
+    .sort((a, b) => MARK_ORDER.indexOf(a.mark) - MARK_ORDER.indexOf(b.mark) || a.rank_order - b.rank_order)
+    .map((p) => p.entry.umaban);
+
+  // 印で埋める: 流しは ◎ が軸で相手は残りの印、フォーメーションは ◎○ → ◎○▲ → 印すべて、ボックスは上位 4 頭
+  const fillFromMarks = () => {
+    if (marked.length === 0) return;
+    if (method === "wheel") {
+      setRows([[marked[0]], marked.slice(1), []]);
+      setAxisAt("0");
+    } else if (method === "formation") {
+      setRows(
+        spec.n === 2
+          ? [[marked[0]], marked.slice(1), []]
+          : [marked.slice(0, 2), marked.slice(0, 3), marked],
+      );
+    } else if (method === "box") {
+      setRows([marked.slice(0, spec.n === 1 ? 3 : 4), [], []]);
     }
   };
 
@@ -316,6 +344,15 @@ export function MyBets({
             ))}
           </div>
 
+          {method !== "single" && marked.length > 0 && (
+            <button
+              type="button"
+              onClick={fillFromMarks}
+              className="h-9 w-full rounded-md border border-dashed border-mine text-[12px] font-bold text-mine active:bg-mine-tint"
+            >
+              印で埋める（{marked.map((u) => result.predictions.find((p) => p.entry.umaban === u)?.mark).join("")}）
+            </button>
+          )}
           {pickRows.map((pr, ri) => (
             <div key={ri}>
               <div className="mb-1 text-[12px] font-bold text-ink-muted">

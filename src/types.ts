@@ -186,7 +186,14 @@ export interface RacePredictionResult {
   /** 自分の馬券（おすすめから編集）。空なら買い目どおり */
   my_bets?: BetRecommendation[];
   /** 組み合わせ馬券の実オッズ（キーは昇順の馬番を "-" でつないだもの）。ワイドは下限 */
-  combo_odds?: { umaren?: Record<string, number>; wide?: Record<string, number>; sanrenpuku?: Record<string, number> };
+  combo_odds?: {
+    umaren?: Record<string, number>;
+    wide?: Record<string, number>;
+    sanrenpuku?: Record<string, number>;
+    /** 馬単・3連単はキーが着順どおり（例 "3-1-7"） */
+    umatan?: Record<string, number>;
+    sanrentan?: Record<string, number>;
+  };
   /** "jravan"（JRA-VAN の履歴で当てはめたモデル）か "basic"（従来の5項目モデル） */
   model_source?: string;
   jv_probs?: [number, number][] | null;

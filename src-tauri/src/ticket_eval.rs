@@ -111,20 +111,20 @@ pub fn evaluate(result: &RacePredictionResult) -> TicketSetEval {
             out.unknown_odds += 1;
             continue;
         };
-        // オッズ: 買い目のものを優先し、なければ取れている実オッズを探す
-        let mut odds = b.est_odds;
-        if odds <= 0.0 {
-            let key = combo_key(&b.horses);
-            let e = &runners[idx[0]].entry;
-            odds = match kind {
-                Kind::Win => e.win_odds.unwrap_or(0.0),
-                Kind::Place => e.place_odds_min.unwrap_or(0.0),
-                Kind::Quinella => *result.combo_odds.umaren.get(&key).unwrap_or(&0.0),
-                Kind::Wide => *result.combo_odds.wide.get(&key).unwrap_or(&0.0),
-                Kind::Trio => *result.combo_odds.sanrenpuku.get(&key).unwrap_or(&0.0),
-                Kind::Exacta | Kind::Trifecta => 0.0,
-            };
-        }
+        // オッズ: いま取れている実オッズを優先し（自分の馬券は足したときのオッズのままなので）、なければ馬券に付いたもの
+        let key = combo_key(&b.horses);
+        let ordered_key = b.horses.iter().map(|h| h.to_string()).collect::<Vec<_>>().join("-");
+        let e = &runners[idx[0]].entry;
+        let live = match kind {
+            Kind::Win => e.win_odds.unwrap_or(0.0),
+            Kind::Place => e.place_odds_min.unwrap_or(0.0),
+            Kind::Quinella => *result.combo_odds.umaren.get(&key).unwrap_or(&0.0),
+            Kind::Wide => *result.combo_odds.wide.get(&key).unwrap_or(&0.0),
+            Kind::Trio => *result.combo_odds.sanrenpuku.get(&key).unwrap_or(&0.0),
+            Kind::Exacta => *result.combo_odds.umatan.get(&ordered_key).unwrap_or(&0.0),
+            Kind::Trifecta => *result.combo_odds.sanrentan.get(&ordered_key).unwrap_or(&0.0),
+        };
+        let odds = if live > 0.0 { live } else { b.est_odds };
         if odds <= 0.0 {
             out.unknown_odds += 1;
         }
@@ -261,9 +261,18 @@ mod tests {
     fn single_win_ticket_matches_win_prob_and_ev() {
         let mut r = jv_prediction(false);
         let (u, p) = probs(&r)[0];
+        // 実オッズがあればそちらを使う（馬券に付いたオッズは足したときの古い値なので）
+        let live = r.predictions.iter().find(|x| x.entry.umaban == u).and_then(|x| x.entry.win_odds).filter(|&o| o > 0.0);
         r.my_bets = vec![bet("単勝", &[u], 4.0, 100)];
         let e = evaluate(&r);
         assert!((e.hit_prob - p).abs() < 1e-9, "{} vs {}", e.hit_prob, p);
+        let used = live.unwrap_or(4.0);
+        assert!((e.expected_return - p * used * 100.0).abs() < 1e-6);
+        // 実オッズがなければ、馬券のオッズを使う
+        for x in r.predictions.iter_mut() {
+            x.entry.win_odds = None;
+        }
+        let e = evaluate(&r);
         assert!((e.expected_return - p * 400.0).abs() < 1e-6);
         assert_eq!(e.key_horse, Some(u));
         assert!((e.buckets.iter().sum::<f64>() - 1.0).abs() < 1e-9);
