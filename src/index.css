@@ -68,3 +68,11 @@
     transform: translateX(300%);
   }
 }
+
+/* スマホ幅: 横にはみ出した要素でページ全体が横に広がらないようにする（表は各自の横スクロールで見る） */
+@media (max-width: 767px) {
+  html,
+  body {
+    overflow-x: clip;
+  }
+}

@@ -54,7 +54,7 @@ export function TicketPanel({
   const recs = result.recommendations.filter((r) => r.suggested_amount > 0);
   const finished = result.race_info.is_finished;
   return (
-    <aside className="flex max-h-[calc(100vh-88px)] flex-col rounded-lg border border-line bg-paper">
+    <aside className="flex max-h-[calc(100vh-88px)] flex-col max-md:max-h-none rounded-lg border border-line bg-paper">
       <div className="shrink-0 border-b border-ink px-4 pb-3 pt-3">
         <div className="flex items-baseline justify-between">
           <h2 className="text-[15px] font-black">

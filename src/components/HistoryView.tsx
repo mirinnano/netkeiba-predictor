@@ -64,7 +64,8 @@ export function HistoryView({
           保存した予想はまだありません。出馬表の画面で「この予想を保存」を押すと、ここに並びます。
         </p>
       ) : (
-        <table className="w-full border-collapse">
+        <div className="max-md:relative max-md:-mx-4 max-md:overflow-x-auto max-md:px-4">
+        <table className="w-full border-collapse whitespace-nowrap max-md:text-[13px]">
           <thead>
             <tr className="border-b border-ink text-[11px] text-ink-muted">
               <th className="py-2 pr-3 text-left font-medium">日付・場</th>
@@ -178,6 +179,7 @@ export function HistoryView({
             })}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   );

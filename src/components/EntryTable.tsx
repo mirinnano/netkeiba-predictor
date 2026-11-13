@@ -56,7 +56,7 @@ export function EntryTable({
           <th className="py-2 pl-1 pr-2 text-left font-medium w-8">印</th>
           <th className="py-2 px-2 text-left font-medium w-10">馬番</th>
           <th className="py-2 px-2 text-left font-medium">馬名</th>
-          <th className="py-2 px-2 text-left font-medium">騎手・斤量</th>
+          <th className="py-2 px-2 text-left font-medium max-md:hidden">騎手・斤量</th>
           <th className="py-2 px-2 text-right font-medium">指数</th>
           <th className="py-2 px-2 text-right font-medium whitespace-nowrap max-[1280px]:hidden">
             {SCORE_KEYS.map((s) => (
@@ -108,11 +108,11 @@ export function EntryTable({
                   <Cloth waku={e.waku} umaban={e.umaban} size="sm" />
                 </td>
                 <td className="py-1.5 px-2">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 whitespace-nowrap">
                     {mine && <span className="w-1.5 h-1.5 rounded-full bg-mine" title="買い目に入っている馬" />}
                     <span className={`font-bold text-[14px] ${e.is_scratched ? "line-through" : ""}`}>{e.horse_name}</span>
-                    <span className="text-[11px] text-ink-muted">{e.sex_age}</span>
-                    <span className="text-[11px] text-ink-muted">{runningStyle(e.running_style)}</span>
+                    <span className="text-[11px] text-ink-muted max-md:hidden">{e.sex_age}</span>
+                    <span className="text-[11px] text-ink-muted max-md:hidden">{runningStyle(e.running_style)}</span>
                     {e.is_scratched && <span className="text-[11px] font-bold text-mark">取消</span>}
                   </div>
                   <div className="text-[11px] text-ink-faint truncate max-w-[260px] max-[1280px]:hidden">
@@ -120,7 +120,7 @@ export function EntryTable({
                     {e.broodmare_sire && `　母父 ${e.broodmare_sire}`}
                   </div>
                 </td>
-                <td className="py-1.5 px-2 whitespace-nowrap">
+                <td className="py-1.5 px-2 whitespace-nowrap max-md:hidden">
                   <span className="font-medium">{e.jockey_name}</span>
                   <span className="num ml-1.5 text-[14px] text-ink-muted">{e.carried_weight.toFixed(1)}</span>
                   {e.body_weight && (

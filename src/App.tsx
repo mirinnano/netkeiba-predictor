@@ -226,40 +226,52 @@ export default function App() {
     }
   };
 
+  const renderTab = (t: (typeof TABS)[number], bottom: boolean) => {
+    const disabled = (t.id === "race" || t.id === "bets") && !prediction;
+    const on = tab === t.id;
+    return (
+      <button
+        key={t.id}
+        type="button"
+        disabled={disabled}
+        aria-current={on ? "page" : undefined}
+        onClick={() => {
+          setTab(t.id);
+          if (t.id === "history") refreshDashboard();
+        }}
+        className={
+          bottom
+            ? `flex min-h-14 flex-1 flex-col items-center justify-center gap-0.5 text-[12px] font-bold transition-colors disabled:opacity-35 ${
+                on ? "text-shell" : "text-ink-muted"
+              }`
+            : `rounded-md px-3.5 py-2 text-[13px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                on ? "bg-paper text-shell" : "text-shell-text hover:bg-shell-deep hover:text-white"
+              }`
+        }
+      >
+        {bottom && <span className={`h-0.5 w-8 rounded-full ${on ? "bg-shell" : "bg-transparent"}`} aria-hidden />}
+        <span>
+          {t.label}
+          {t.id === "bets" && prediction && (
+            <span className="num ml-1 text-[14px] opacity-70">
+              {prediction.recommendations.filter((r) => r.suggested_amount > 0).length}
+            </span>
+          )}
+        </span>
+      </button>
+    );
+  };
+
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-30 bg-shell text-white">
-        <div className="mx-auto flex h-14 max-w-[1600px] items-center gap-6 px-6">
+        <div className="mx-auto flex h-14 max-w-[1600px] items-center gap-6 px-6 max-md:h-auto max-md:flex-wrap max-md:gap-x-3 max-md:gap-y-2 max-md:px-4 max-md:pb-2.5 max-md:pt-[max(10px,env(safe-area-inset-top))]">
           <span className="text-[17px] font-black tracking-wide">KeibaScope</span>
-          <nav aria-label="画面" className="flex gap-1">
-            {TABS.map((t) => {
-              const disabled = (t.id === "race" || t.id === "bets") && !prediction;
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  disabled={disabled}
-                  aria-current={tab === t.id ? "page" : undefined}
-                  onClick={() => {
-                    setTab(t.id);
-                    if (t.id === "history") refreshDashboard();
-                  }}
-                  className={`rounded-md px-3.5 py-2 text-[13px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                    tab === t.id ? "bg-paper text-shell" : "text-shell-text hover:bg-shell-deep hover:text-white"
-                  }`}
-                >
-                  {t.label}
-                  {t.id === "bets" && prediction && (
-                    <span className="num ml-1.5 text-[14px] opacity-70">
-                      {prediction.recommendations.filter((r) => r.suggested_amount > 0).length}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
+          <nav aria-label="画面" className="flex gap-1 max-md:hidden">
+            {TABS.map((t) => renderTab(t, false))}
           </nav>
           <form
-            className="ml-auto flex w-[460px] max-w-[45%] items-center gap-2"
+            className="ml-auto flex w-[460px] max-w-[45%] items-center gap-2 max-md:ml-0 max-md:w-full max-md:max-w-none"
             onSubmit={(e) => {
               e.preventDefault();
               analyze();
@@ -273,13 +285,13 @@ export default function App() {
                 placeholder="レースID（12桁）か netkeiba のURL"
                 aria-label="レースIDまたはnetkeibaのURL"
                 spellCheck={false}
-                className="num h-9 w-full rounded-md border border-shell-edge bg-shell-deep pl-8 pr-2 text-[15px] text-white placeholder:font-sans placeholder:text-[12px] placeholder:text-shell-text focus:border-white focus:outline-none"
+                className="num h-9 w-full rounded-md border border-shell-edge bg-shell-deep pl-8 pr-2 text-[15px] max-md:h-11 max-md:text-[16px] text-white placeholder:font-sans placeholder:text-[12px] placeholder:text-shell-text focus:border-white focus:outline-none"
               />
             </div>
             <button
               type="submit"
               disabled={busy || !raceInput.trim()}
-              className="flex h-9 items-center gap-1.5 rounded-md bg-paper px-4 text-[13px] font-bold text-shell hover:bg-ground disabled:opacity-50"
+              className="flex h-9 items-center gap-1.5 rounded-md bg-paper px-4 text-[13px] font-bold text-shell hover:bg-ground disabled:opacity-50 max-md:h-11"
             >
               {busy && <Loader2 className="h-4 w-4 animate-spin" />}
               予想する
@@ -293,7 +305,7 @@ export default function App() {
         )}
       </header>
 
-      <main className="mx-auto max-w-[1600px] px-6 py-5">
+      <main className="mx-auto max-w-[1600px] px-6 py-5 max-md:px-4 max-md:pb-[calc(88px+env(safe-area-inset-bottom))] max-md:pt-4">
         {busy && busyText && <p className="mb-3 text-[12px] text-ink-muted">{busyText}…</p>}
         {error && (
           <div role="alert" className="mb-4 flex items-start gap-3 rounded-md border border-mark/40 bg-mark/5 px-4 py-2.5 text-[13px]">
@@ -364,6 +376,12 @@ export default function App() {
           />
         )}
       </main>
+      <nav
+        aria-label="画面"
+        className="fixed inset-x-0 bottom-0 z-30 flex border-t border-line bg-paper pb-[env(safe-area-inset-bottom)] md:hidden"
+      >
+        {TABS.map((t) => renderTab(t, true))}
+      </nav>
 
       {toast && (
         <div

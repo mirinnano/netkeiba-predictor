@@ -16,10 +16,17 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["custom-protocol"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "charset", "http2", "macos-system-configuration"] }
 scraper = "0.20"
 encoding_rs = "0.8"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
+
+# HTTPS: デスクトップは OS の TLS、Android は rustls（OpenSSL を持ち込まないため）
+[target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

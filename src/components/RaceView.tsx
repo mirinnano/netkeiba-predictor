@@ -51,7 +51,7 @@ export function RaceView({
     <div className="space-y-4">
       {/* レース名と条件 */}
       <div className="flex flex-wrap items-end gap-x-4 gap-y-2">
-        <h1 className="text-[30px] font-black leading-none tracking-tight">{info.race_name}</h1>
+        <h1 className="text-[30px] font-black leading-none tracking-tight max-md:text-[24px]">{info.race_name}</h1>
         {info.grade && (
           <span className="rounded-sm bg-ink px-1.5 py-0.5 text-[13px] font-black text-waku-5">{info.grade}</span>
         )}
@@ -134,17 +134,17 @@ export function RaceView({
 
       {showWeights && <FactorShares shares={result.factor_shares ?? []} model={result.model_source} />}
 
-      <div className="grid grid-cols-[minmax(0,1fr)_360px] items-start gap-6 max-[1280px]:grid-cols-[minmax(0,1fr)_300px] max-[1280px]:gap-4">
+      <div className="grid grid-cols-[minmax(0,1fr)_360px] items-start gap-6 max-[1280px]:grid-cols-[minmax(0,1fr)_300px] max-[1280px]:gap-4 max-md:grid-cols-1">
         <section className="min-w-0">
           {lead && (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b-2 border-ink pb-3">
               <span className="text-[40px] font-black leading-none text-mark">◎</span>
               <Cloth waku={lead.entry.waku} umaban={lead.entry.umaban} size="lg" />
-              <span className="text-[30px] font-black leading-none">{lead.entry.horse_name}</span>
+              <span className="text-[30px] font-black leading-none max-md:text-[22px]">{lead.entry.horse_name}</span>
               <span className="text-ink-muted">
                 {lead.entry.sex_age} ・ {lead.entry.jockey_name} {lead.entry.carried_weight.toFixed(1)}
               </span>
-              <dl className="ml-auto flex gap-6">
+              <dl className="ml-auto flex gap-6 max-md:ml-0 max-md:w-full max-md:justify-between max-md:gap-2">
                 {[
                   ["指数", lead.total_index.toFixed(1)],
                   ["勝率", pct(lead.win_prob)],
@@ -153,7 +153,7 @@ export function RaceView({
                   ["期待値", lead.expected_value.toFixed(2)],
                 ].map(([k, v]) => (
                   <div key={k} className="text-right">
-                    <dd className="num text-[26px] font-bold leading-none">{v}</dd>
+                    <dd className="num text-[26px] font-bold leading-none max-md:text-[21px]">{v}</dd>
                     <dt className="text-[11px] text-ink-muted">{k}</dt>
                   </div>
                 ))}
@@ -188,6 +188,7 @@ export function RaceView({
             </div>
           </div>
 
+          <div className="max-md:relative max-md:-mx-4 max-md:overflow-x-auto max-md:px-4">
           <EntryTable
             rows={rows}
             finished={info.is_finished}
@@ -197,10 +198,11 @@ export function RaceView({
             onSelect={setSelected}
             onToggle={(u) => setExpanded((cur) => (cur === u ? null : u))}
           />
+          </div>
           <p className="pt-3 text-[12px] leading-relaxed text-ink-muted max-w-[72ch]">{pace.commentary}</p>
         </section>
 
-        <div className="sticky top-[72px]">
+        <div className="sticky top-[72px] max-md:static max-md:order-first">
           <TicketPanel
             result={result}
             wakuOf={(u) => wakuMap.get(u) ?? 1}

@@ -235,8 +235,10 @@ async fn verify_saved_race_result(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .setup(|app| {
-            if let Some(window) = app.get_webview_window("main") {
+        .setup(|_app| {
+            // デスクトップだけ: 起動時にウィンドウを前に出す（Android にはウィンドウ操作がない）
+            #[cfg(desktop)]
+            if let Some(window) = _app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();

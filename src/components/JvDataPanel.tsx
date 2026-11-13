@@ -34,11 +34,12 @@ export function JvDataPanel({
         ) : (
           <span className="text-[12px] text-ink-muted">
             まだありません。取り込むと、勝率を JRA-VAN の履歴で当てはめたモデルで計算します。
+            <span className="md:hidden">スマホでは、Mac で作ったデータを転送して入れます（tools/mobile_db.sh）。</span>
           </span>
         )}
       </div>
       <form
-        className="mt-2 flex items-center gap-2"
+        className="mt-2 flex items-center gap-2 max-md:hidden"
         onSubmit={async (e) => {
           e.preventDefault();
           if (!dir.trim()) return;
@@ -64,7 +65,7 @@ export function JvDataPanel({
           取り込む
         </button>
       </form>
-      <p className="mt-1 text-[11px] text-ink-faint">前回の続きから、増えた分だけを読みます。何度実行しても同じ結果になります。</p>
+      <p className="mt-1 text-[11px] text-ink-faint max-md:hidden">前回の続きから、増えた分だけを読みます。何度実行しても同じ結果になります。</p>
       {last && (
         <ul className="mt-2 text-[11px] text-ink-muted">
           {last.map((r) => (

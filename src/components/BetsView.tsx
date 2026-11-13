@@ -21,7 +21,8 @@ export function BetsView({ result }: { result: RacePredictionResult }) {
 
       <div className="grid grid-cols-[minmax(0,1fr)_320px] items-start gap-6 max-[1180px]:grid-cols-1">
         <section className="min-w-0">
-          <table className="w-full border-collapse">
+          <div className="max-md:relative max-md:-mx-4 max-md:overflow-x-auto max-md:px-4">
+          <table className="w-full border-collapse whitespace-nowrap max-md:text-[13px]">
             <thead>
               <tr className="border-b border-ink text-[11px] text-ink-muted">
                 <th className="py-2 pr-3 text-left font-medium">券種</th>
@@ -88,6 +89,7 @@ export function BetsView({ result }: { result: RacePredictionResult }) {
               </tr>
             </tfoot>
           </table>
+          </div>
           <p className="mt-4 max-w-[72ch] text-[12px] leading-relaxed text-ink-muted">
             的中率は、過去走・スピード指数・騎手・父の成績から当てはめた勝率をもとに、2・3着の偏りを補正した Harville モデルで計算しています。
             2023〜2025年のJRA 1518レースでの検証では、勝率の当たり具合は単勝オッズ（市場）の方が上でした。期待値が1を超える買い目も、モデルと市場の意見の差であって、勝てる保証ではありません。
