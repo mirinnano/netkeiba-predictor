@@ -1,62 +1,42 @@
-import { ScoringWeights } from "../types";
+import { FactorShare, ScoringWeights } from "../types";
 
-export const WEIGHT_ITEMS: { key: keyof ScoringWeights; label: string }[] = [
-  { key: "ability", label: "能力・着順" },
-  { key: "speed", label: "時計・上がり" },
-  { key: "aptitude", label: "コース適性" },
-  { key: "jockey_frame", label: "騎手・枠" },
-  { key: "pace", label: "展開" },
-];
+/** 既定の重み（API との互換のために送るだけ。勝率の計算には使わない） */
+export const DEFAULT_WEIGHTS: ScoringWeights = { ability: 30, speed: 25, aptitude: 20, jockey_frame: 15, pace: 10 };
 
-export const PRESETS: { name: string; w: ScoringWeights }[] = [
-  { name: "標準", w: { ability: 30, speed: 25, aptitude: 20, jockey_frame: 15, pace: 10 } },
-  { name: "時計・末脚", w: { ability: 20, speed: 45, aptitude: 15, jockey_frame: 10, pace: 10 } },
-  { name: "適性・騎手", w: { ability: 20, speed: 15, aptitude: 35, jockey_frame: 25, pace: 5 } },
-  { name: "展開", w: { ability: 20, speed: 20, aptitude: 15, jockey_frame: 15, pace: 30 } },
-];
-
-export function WeightsPanel({
-  weights,
-  onChange,
-  onPreset,
-}: {
-  weights: ScoringWeights;
-  onChange: (w: ScoringWeights) => void;
-  onPreset: (w: ScoringWeights) => void;
-}) {
-  const total = WEIGHT_ITEMS.reduce((s, i) => s + weights[i.key], 0) || 1;
-  return (
-    <div className="flex flex-wrap items-end gap-x-6 gap-y-3 rounded-lg border border-line bg-paper px-4 py-3">
-      {WEIGHT_ITEMS.map((item) => (
-        <label key={item.key} className="flex w-[150px] flex-col gap-1">
-          <span className="flex items-baseline justify-between text-[12px]">
-            <span className="font-bold">{item.label}</span>
-            <span className="num text-[15px] text-ink-muted">{Math.round((weights[item.key] / total) * 100)}%</span>
-          </span>
-          <input
-            type="range"
-            min={0}
-            max={60}
-            step={5}
-            value={weights[item.key]}
-            onChange={(e) => onChange({ ...weights, [item.key]: Number(e.target.value) })}
-            className="accent-shell"
-          />
-        </label>
-      ))}
-      <div className="ml-auto flex items-center gap-1.5">
-        <span className="text-[11px] text-ink-muted">プリセット</span>
-        {PRESETS.map((p) => (
-          <button
-            key={p.name}
-            type="button"
-            onClick={() => onPreset(p.w)}
-            className="rounded border border-line px-2.5 py-1 text-[12px] font-bold text-ink-soft hover:border-ink hover:text-ink"
-          >
-            {p.name}
-          </button>
-        ))}
+/**
+ * 指数の内訳。重みは手で決めず、モデルの係数から自動で決まる。
+ * 割合は「このレースで、その要素が馬どうしの差をどれだけ作っているか」。
+ */
+export function FactorShares({ shares, model }: { shares: FactorShare[]; model?: string }) {
+  if (shares.length === 0) {
+    return (
+      <div className="rounded-lg border border-line bg-paper px-4 py-3 text-[12px] text-ink-muted">
+        この予想には内訳がありません（保存された古い予想です）。取り直すと表示されます。
       </div>
+    );
+  }
+  const max = Math.max(...shares.map((s) => s.share));
+  return (
+    <div className="rounded-lg border border-line bg-paper px-4 py-3">
+      <div className="mb-2 flex flex-wrap items-baseline gap-x-3 text-[12px]">
+        <span className="font-bold">指数の内訳（自動）</span>
+        <span className="text-ink-muted">
+          {model === "jravan"
+            ? "2021〜2025年の JRA 16,650 レースで当てはめた係数から、このレースでの各要素の効き方を出しています。"
+            : "過去のレースで当てはめた係数から、このレースでの各要素の効き方を出しています。"}
+        </span>
+      </div>
+      <ul className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5">
+        {shares.map((s) => (
+          <li key={s.name} className="contents">
+            <span className="text-[12px] font-bold">{s.name}</span>
+            <span className="h-2 rounded-sm bg-line-soft">
+              <span className="block h-2 rounded-sm bg-shell" style={{ width: `${(s.share / max) * 100}%` }} />
+            </span>
+            <span className="num w-10 text-right text-[15px] text-ink-muted">{Math.round(s.share * 100)}%</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

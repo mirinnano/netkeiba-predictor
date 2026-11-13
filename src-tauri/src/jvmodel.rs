@@ -515,9 +515,24 @@ fn softmax(v: &[f64]) -> Vec<f64> {
     e.iter().map(|x| x / s).collect()
 }
 
+/// 採用特徴量（ADOPTED の順）が、表示用のどの要素に入るか（models::FACTOR_NAMES の 0..5）
+/// 0=能力 1=時計 2=適性 3=騎手・枠 4=展開 5=調教
+pub const JV_GROUP: [usize; 38] = [
+    1, 1, 1, 1, 4, 4, 0, 0, 0, 0, 0, 3, 3, 3, 0, 2, 2, 3, 0, 0, 0, 0, 0, 0, 3, 4, 2, 2, 3, 3,
+    5, 5, 5, 5, 5, 5, 5, 5,
+];
+
 /// 勝率。全頭に単勝オッズがあれば「市場＋モデル」、なければ「モデルのみ」の係数を使う。
 /// 係数は src/jv_coef.rs（`jv_model --export` が書き出す）
 pub fn win_probs(features: &[Vec<f64>], odds: &[Option<f64>]) -> (Vec<f64>, bool) {
+    let (p, m, _) = win_probs_detail(features, odds);
+    (p, m)
+}
+
+/// 勝率に加えて、馬ごとの要素別の寄与を返す。
+/// 寄与は「オッズを使わないモデル」の係数で出す（市場モデルの係数はオッズに対する上積みなので、
+/// 能力などの絶対的な強さとしては読めないため）。7番目（単勝オッズ）は常に 0。
+pub fn win_probs_detail(features: &[Vec<f64>], odds: &[Option<f64>]) -> (Vec<f64>, bool, Vec<[f64; 7]>) {
     use crate::jv_coef::{MARKET_BETA, MARKET_GAMMA, SOLO_BETA};
     let with_market = !odds.is_empty() && odds.iter().all(|o| o.map(|v| v > 0.0).unwrap_or(false));
     let u: Vec<f64> = if with_market {
@@ -531,7 +546,17 @@ pub fn win_probs(features: &[Vec<f64>], odds: &[Option<f64>]) -> (Vec<f64>, bool
     } else {
         features.iter().map(|x| ADOPTED.iter().zip(SOLO_BETA.iter()).map(|(&f, b)| b * x[f]).sum::<f64>()).collect()
     };
-    (softmax(&u), with_market)
+    let contrib: Vec<[f64; 7]> = features
+        .iter()
+        .map(|x| {
+            let mut c = [0.0; 7];
+            for (j, (&f, b)) in ADOPTED.iter().zip(SOLO_BETA.iter()).enumerate() {
+                c[JV_GROUP[j]] += b * x[f];
+            }
+            c
+        })
+        .collect();
+    (softmax(&u), with_market, contrib)
 }
 
 /// アプリ用: `until`（yyyymmdd）の前日までの確定成績で Engine を作る

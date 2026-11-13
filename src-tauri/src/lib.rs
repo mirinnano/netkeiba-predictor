@@ -131,8 +131,11 @@ fn recalculate_prediction(
         .map(|p| p.entry)
         .collect();
 
-    // JRA-VAN モデルの勝率は重みで変わらないので、そのまま使い続ける
-    let jv: Option<std::collections::HashMap<u32, f64>> = current_result.jv_probs.as_ref().map(|v| v.iter().cloned().collect());
+    // JRA-VAN モデルの勝率と寄与は再計算で変わらないので、保存されたものを使い続ける
+    let jv: Option<models::JvModelOut> = current_result.jv_probs.as_ref().map(|v| models::JvModelOut {
+        probs: v.iter().cloned().collect(),
+        contrib: current_result.jv_contrib.clone().unwrap_or_default().into_iter().collect(),
+    });
     let mut updated = predictor::run_prediction_with(
         current_result.race_info,
         entries,

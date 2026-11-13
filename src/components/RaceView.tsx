@@ -1,20 +1,17 @@
 import { useMemo, useState } from "react";
-import { RefreshCw, SlidersHorizontal } from "lucide-react";
-import { RacePredictionResult, ScoringWeights } from "../types";
+import { BarChart3, RefreshCw } from "lucide-react";
+import { RacePredictionResult } from "../types";
 import { byPredictedOrder, pct, surfaceLabel, ticketHorses } from "../lib/format";
 import { CapStrip } from "./CapStrip";
 import { Cloth } from "./Cloth";
 import { EntryTable } from "./EntryTable";
 import { TicketPanel } from "./TicketPanel";
-import { WeightsPanel } from "./WeightsPanel";
+import { FactorShares } from "./WeightsPanel";
 
 export function RaceView({
   result,
-  weights,
   budget,
   strategy,
-  onWeights,
-  onPreset,
   onBudget,
   onStrategy,
   onSave,
@@ -24,11 +21,8 @@ export function RaceView({
   onMemo,
 }: {
   result: RacePredictionResult;
-  weights: ScoringWeights;
   budget: number;
   strategy: string;
-  onWeights: (w: ScoringWeights) => void;
-  onPreset: (w: ScoringWeights) => void;
   onBudget: (b: number) => void;
   onStrategy: (s: string) => void;
   onSave: () => void;
@@ -111,8 +105,8 @@ export function RaceView({
               showWeights ? "border-ink bg-ink text-white" : "border-line bg-paper text-ink-soft hover:border-ink"
             }`}
           >
-            <SlidersHorizontal className="h-4 w-4" />
-            指数の重み
+            <BarChart3 className="h-4 w-4" />
+            指数の内訳
           </button>
           <button
             type="button"
@@ -138,7 +132,7 @@ export function RaceView({
         }}
       />
 
-      {showWeights && <WeightsPanel weights={weights} onChange={onWeights} onPreset={onPreset} />}
+      {showWeights && <FactorShares shares={result.factor_shares ?? []} model={result.model_source} />}
 
       <div className="grid grid-cols-[minmax(0,1fr)_360px] items-start gap-6 max-[1280px]:grid-cols-[minmax(0,1fr)_300px] max-[1280px]:gap-4">
         <section className="min-w-0">

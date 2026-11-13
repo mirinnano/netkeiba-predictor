@@ -97,6 +97,14 @@ export interface HorsePrediction {
   expected_value: number;
   value_rank: string;
   reasons: string[];
+  /** 調教の寄与（偏差値）。JRA-VAN モデルのときだけ */
+  training_score?: number | null;
+}
+
+/** 指数を作っている要素と、このレースでの割合（合計 1。モデルの係数から自動で決まる） */
+export interface FactorShare {
+  name: string;
+  share: number;
 }
 
 export interface ScoringWeights {
@@ -176,6 +184,8 @@ export interface RacePredictionResult {
   /** "jravan"（JRA-VAN の履歴で当てはめたモデル）か "basic"（従来の5項目モデル） */
   model_source?: string;
   jv_probs?: [number, number][] | null;
+  jv_contrib?: [number, number[]][] | null;
+  factor_shares?: FactorShare[];
 }
 
 export interface JvStatus {

@@ -14,7 +14,7 @@ import { RaceView } from "./components/RaceView";
 import { BetsView } from "./components/BetsView";
 import { BrowserView } from "./components/BrowserView";
 import { HistoryView } from "./components/HistoryView";
-import { PRESETS } from "./components/WeightsPanel";
+import { DEFAULT_WEIGHTS } from "./components/WeightsPanel";
 import { JvDataPanel } from "./components/JvDataPanel";
 
 type Tab = "race" | "browser" | "bets" | "history";
@@ -35,7 +35,7 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
 
   const [prediction, setPrediction] = useState<RacePredictionResult | null>(null);
-  const [weights, setWeights] = useState<ScoringWeights>(PRESETS[0].w);
+  const [weights, setWeights] = useState<ScoringWeights>(DEFAULT_WEIGHTS);
   const [budget, setBudget] = useState(3000);
   const [strategy, setStrategy] = useState("balance");
   const [memo, setMemo] = useState("");
@@ -51,7 +51,6 @@ export default function App() {
 
   // 再計算は連続で呼ばれるので、最後に投げたものだけを反映する
   const recalcSeq = useRef(0);
-  const sliderTimer = useRef<number | undefined>(undefined);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -160,12 +159,6 @@ export default function App() {
     } catch (e) {
       setError(String(e));
     }
-  };
-
-  const changeWeights = (w: ScoringWeights) => {
-    setWeights(w);
-    window.clearTimeout(sliderTimer.current);
-    sliderTimer.current = window.setTimeout(() => recalc(w, budget, strategy), 180);
   };
 
   const save = async () => {
@@ -320,14 +313,8 @@ export default function App() {
         {tab === "race" && prediction && (
           <RaceView
             result={prediction}
-            weights={weights}
             budget={budget}
             strategy={strategy}
-            onWeights={changeWeights}
-            onPreset={(w) => {
-              setWeights(w);
-              recalc(w, budget, strategy);
-            }}
             onBudget={(b) => {
               setBudget(b);
               recalc(weights, b, strategy);

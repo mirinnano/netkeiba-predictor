@@ -417,8 +417,9 @@ pub fn run_prediction_with(
     strategy: String,
     memo: String,
     combo_odds: ComboOdds,
-    jv_probs: Option<&std::collections::HashMap<u32, f64>>,
+    jv: Option<&crate::models::JvModelOut>,
 ) -> RacePredictionResult {
+    let jv_probs = jv.map(|j| &j.probs);
     let pace_analysis = analyze_pace(&race_info, &entries);
 
     // Collect field-wide average speed & last 3F for relative normalization
@@ -468,6 +469,7 @@ pub fn run_prediction_with(
                 expected_value: 0.0,
                 value_rank: "C".to_string(),
                 reasons: vec!["出走取消・除外".to_string()],
+                training_score: None,
             });
             continue;
         }
@@ -512,11 +514,12 @@ pub fn run_prediction_with(
             expected_value: 0.0,
             value_rank: "B".to_string(),
             reasons,
+            training_score: None,
         });
     }
 
     // 勝率: 特徴量をレース内で標準化し、当てはめた係数で効用を出して softmax する。
-    // 重みスライダーは、既定値との比で各グループの係数を伸び縮みさせる。
+    // 指数の重みはモデルの係数そのもの（手動の重みは使わない）。
     let active_idx: Vec<usize> = (0..preds.len())
         .filter(|&i| !preds[i].entry.is_scratched)
         .collect();
@@ -530,28 +533,28 @@ pub fn run_prediction_with(
         .map(|&i| feature_row(&preds[i], &race_info, field_cw, &STD_TIMES))
         .collect();
     let z = standardize(&rows);
-    let d = ScoringWeights::default();
-    let w_total = (weights.ability + weights.speed + weights.aptitude + weights.jockey_frame + weights.pace).max(1e-9);
-    let d_total = d.ability + d.speed + d.aptitude + d.jockey_frame + d.pace;
-    let group_scale = |g: usize| -> f64 {
-        let (w, dw) = match g {
-            0 => (weights.ability, d.ability),
-            1 => (weights.speed, d.speed),
-            2 => (weights.aptitude, d.aptitude),
-            3 => (weights.jockey_frame, d.jockey_frame),
-            _ => (weights.pace, d.pace),
-        };
-        (w / w_total) / (dw / d_total)
-    };
-    let utility: Vec<f64> = z
+    // 要素ごとの寄与（FACTOR_NAMES の順。基本モデルは 0..5 の5要素だけ）
+    let mut contrib: Vec<[f64; 7]> = z
         .iter()
         .map(|row| {
-            row.iter()
-                .enumerate()
-                .map(|(f, x)| MODEL_BETA[f] * group_scale(FEATURE_GROUP[f]) * x)
-                .sum()
+            let mut c = [0.0; 7];
+            for (f, x) in row.iter().enumerate() {
+                c[FEATURE_GROUP[f]] += MODEL_BETA[f] * x;
+            }
+            c
         })
         .collect();
+    let utility: Vec<f64> = contrib.iter().map(|c| c.iter().sum()).collect();
+    if let Some(j) = jv {
+        for (a, &i) in active_idx.iter().enumerate() {
+            if let Some(v) = j.contrib.get(&preds[i].entry.umaban) {
+                for (k, x) in v.iter().take(7).enumerate() {
+                    contrib[a][k] = *x;
+                }
+            }
+        }
+    }
+    let _ = &weights;
     // JRA-VAN モデルの勝率があれば、効用を log(勝率) に置き換える（順位・指数・印もそれに従う）
     let utility: Vec<f64> = match jv_probs {
         Some(m) => active_idx.iter().map(|&i| m.get(&preds[i].entry.umaban).copied().unwrap_or(1e-4).max(1e-6).ln()).collect(),
@@ -566,6 +569,38 @@ pub fn run_prediction_with(
     let umax = utility.iter().cloned().fold(f64::MIN, f64::max);
     let win_probs = harville::normalize(&utility.iter().map(|u| (u - umax).exp()).collect::<Vec<_>>());
     let top3_probs = harville::Model::new(&win_probs).top3();
+
+    // 表示用の5要素（＋調教）は、各要素の寄与をレース内の偏差値にしたもの。重みはモデルが決める
+    let n_act = active_idx.len().max(1) as f64;
+    let mut sds = [0.0f64; 7];
+    let mut means = [0.0f64; 7];
+    for k in 0..7 {
+        means[k] = contrib.iter().map(|c| c[k]).sum::<f64>() / n_act;
+        sds[k] = (contrib.iter().map(|c| (c[k] - means[k]).powi(2)).sum::<f64>() / n_act).sqrt();
+    }
+    let dev = |a: usize, k: usize| -> f64 {
+        if sds[k] < 1e-9 { 50.0 } else { (((50.0 + (contrib[a][k] - means[k]) / sds[k] * 10.0) * 10.0).round() / 10.0).clamp(0.0, 100.0) }
+    };
+    for (a, &i) in active_idx.iter().enumerate() {
+        let p = &mut preds[i];
+        p.ability_score = dev(a, 0);
+        p.speed_score = dev(a, 1);
+        p.aptitude_score = dev(a, 2);
+        p.jockey_frame_score = dev(a, 3);
+        p.pace_score = dev(a, 4);
+        p.training_score = if jv.is_some() { Some(dev(a, 5)) } else { None };
+    }
+    let sd_total: f64 = sds.iter().sum();
+    let factor_shares: Vec<crate::models::FactorShare> = if sd_total < 1e-9 {
+        Vec::new()
+    } else {
+        crate::models::FACTOR_NAMES
+            .iter()
+            .zip(sds.iter())
+            .filter(|(_, sd)| **sd > 1e-9)
+            .map(|(name, sd)| crate::models::FactorShare { name: name.to_string(), share: ((sd / sd_total) * 1000.0).round() / 1000.0 })
+            .collect()
+    };
 
     for (a, &i) in active_idx.iter().enumerate() {
         let p = &mut preds[i];
@@ -695,6 +730,12 @@ pub fn run_prediction_with(
             v.sort_by_key(|x| x.0);
             v
         }),
+        jv_contrib: jv.map(|j| {
+            let mut v: Vec<(u32, Vec<f64>)> = j.contrib.iter().map(|(k, c)| (*k, c.clone())).collect();
+            v.sort_by_key(|x| x.0);
+            v
+        }),
+        factor_shares,
         combo_odds,
     }
 }

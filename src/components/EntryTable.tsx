@@ -4,16 +4,18 @@ import { HorsePrediction } from "../types";
 import { pct, runningStyle } from "../lib/format";
 import { Cloth } from "./Cloth";
 
-const SCORE_KEYS: { key: keyof HorsePrediction; label: string }[] = [
+// 各要素の寄与をレース内の偏差値にしたもの（50 が平均）。調教は JRA-VAN モデルのときだけ
+const BASE_KEYS: { key: keyof HorsePrediction; label: string }[] = [
   { key: "ability_score", label: "能力" },
   { key: "speed_score", label: "時計" },
   { key: "aptitude_score", label: "適性" },
   { key: "jockey_frame_score", label: "騎手" },
   { key: "pace_score", label: "展開" },
 ];
+const TRAINING_KEY: { key: keyof HorsePrediction; label: string } = { key: "training_score", label: "調教" };
 
 function Score({ v }: { v: number }) {
-  const strong = v >= 80;
+  const strong = v >= 60;
   return (
     <span className={`num inline-block w-7 text-right text-[15px] ${strong ? "font-bold text-ink" : "text-ink-muted"}`}>
       {v.toFixed(0)}
@@ -45,6 +47,7 @@ export function EntryTable({
   }, [selected]);
 
   const cols = 11 + (finished ? 1 : 0);
+  const SCORE_KEYS = rows.some((p) => p.training_score != null) ? [...BASE_KEYS, TRAINING_KEY] : BASE_KEYS;
 
   return (
     <table className="w-full border-collapse">
@@ -131,7 +134,7 @@ export function EntryTable({
                   <span className="num text-[18px] font-bold">{e.is_scratched ? "-" : p.total_index.toFixed(1)}</span>
                 </td>
                 <td className="py-1.5 px-2 text-right whitespace-nowrap max-[1280px]:hidden">
-                  {!e.is_scratched && SCORE_KEYS.map((s) => <Score key={s.label} v={p[s.key] as number} />)}
+                  {!e.is_scratched && SCORE_KEYS.map((s) => <Score key={s.label} v={(p[s.key] as number | null) ?? 50} />)}
                 </td>
                 <td className="py-1.5 px-2 text-right num text-[15px]">{e.is_scratched ? "" : pct(p.win_prob)}</td>
                 <td className="py-1.5 px-2 text-right num text-[15px] text-ink-muted max-[1280px]:hidden">

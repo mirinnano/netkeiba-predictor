@@ -7,7 +7,7 @@
 use crate::jvdata::JvRace;
 use crate::jvmodel::{self, Card, CardRunner, Engine};
 use crate::jvstore;
-use crate::models::{HorseEntry, RaceInfo};
+use crate::models::{HorseEntry, JvModelOut, RaceInfo};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -70,8 +70,8 @@ fn age_of(sex_age: &str) -> u32 {
     sex_age.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0)
 }
 
-/// JRA-VAN モデルの勝率（馬番 → 勝率）。平地以外・DB にない日付などで使えないときは None
-pub fn jv_probs(db: &Path, info: &RaceInfo, entries: &[HorseEntry]) -> Result<Option<HashMap<u32, f64>>, String> {
+/// JRA-VAN モデルの勝率と要素別の寄与。平地以外・DB にない日付などで使えないときは None
+pub fn jv_probs(db: &Path, info: &RaceInfo, entries: &[HorseEntry]) -> Result<Option<JvModelOut>, String> {
     if !(info.surface == "芝" || info.surface == "ダ") {
         return Ok(None); // 障害戦は学習していない
     }
@@ -127,8 +127,11 @@ pub fn jv_probs(db: &Path, info: &RaceInfo, entries: &[HorseEntry]) -> Result<Op
     let engine = &guard.as_ref().unwrap().engine;
     let x = engine.features(&card);
     let odds: Vec<Option<f64>> = started.iter().map(|e| e.win_odds).collect();
-    let (p, _with_market) = jvmodel::win_probs(&x, &odds);
-    Ok(Some(card.runners.iter().zip(p).map(|(h, p)| (h.umaban, p)).collect()))
+    let (p, _with_market, contrib) = jvmodel::win_probs_detail(&x, &odds);
+    Ok(Some(JvModelOut {
+        probs: card.runners.iter().zip(&p).map(|(h, p)| (h.umaban, *p)).collect(),
+        contrib: card.runners.iter().zip(&contrib).map(|(h, c)| (h.umaban, c.to_vec())).collect(),
+    }))
 }
 
 /// netkeiba が使えないとき用: DB の JRA-VAN 出馬表から、アプリの入力を組み立てる（過去走の詳細は持たない）

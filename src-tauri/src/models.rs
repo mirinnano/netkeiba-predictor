@@ -107,6 +107,26 @@ pub struct HorsePrediction {
     pub expected_value: f64,      // win_prob * win_odds (e.g. 1.25)
     pub value_rank: String,       // "S" | "A" | "B" | "C"
     pub reasons: Vec<String>,     // Highlight tags/reasons
+    /// 調教の寄与（偏差値）。JRA-VAN モデルのときだけ
+    #[serde(default)]
+    pub training_score: Option<f64>,
+}
+
+/// 指数を作っている要素の名前（寄与の並び順）。「単勝オッズ」は予備（今は寄与を 0 にしている）
+pub const FACTOR_NAMES: [&str; 7] = ["能力", "時計", "適性", "騎手・枠", "展開", "調教", "単勝オッズ"];
+
+/// このレースで、各要素が馬の差をどれだけ作っているか（合計 1）。モデルの係数から自動で決まる
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactorShare {
+    pub name: String,
+    pub share: f64,
+}
+
+/// JRA-VAN モデルの出力: 勝率と、要素ごとの寄与（FACTOR_NAMES の順）
+#[derive(Debug, Clone, Default)]
+pub struct JvModelOut {
+    pub probs: std::collections::HashMap<u32, f64>,
+    pub contrib: std::collections::HashMap<u32, Vec<f64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,6 +231,12 @@ pub struct RacePredictionResult {
     /// JRA-VAN モデルの勝率（馬番, 勝率）。重みを変えて再計算しても勝率を保つために持つ
     #[serde(default)]
     pub jv_probs: Option<Vec<(u32, f64)>>,
+    /// JRA-VAN モデルの要素ごとの寄与（馬番, FACTOR_NAMES の順）
+    #[serde(default)]
+    pub jv_contrib: Option<Vec<(u32, Vec<f64>)>>,
+    /// 指数の重み（モデルから自動で決まる、このレースでの各要素の割合）
+    #[serde(default)]
+    pub factor_shares: Vec<FactorShare>,
 }
 
 /// 組み合わせ馬券の実オッズ。キーは昇順の馬番を "-" で連結したもの（例: "1-2", "1-2-3"）。

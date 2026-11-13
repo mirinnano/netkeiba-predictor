@@ -25,6 +25,9 @@ const GROUPS: [(&str, &[usize]); 11] = [
     ("血統", &[43, 44, 45, 46]),
 ];
 
+/// 採用中の L2 正則化の強さ（2026-11-13: 0.01 → 0.1。--explore で 0.01 より 0.0005 良かった）
+const L2: f64 = 0.1;
+
 struct Runner {
     market: f64,
     odds: f64,
@@ -96,6 +99,10 @@ fn main() {
         coverage.0,
         coverage.1 as f64 / coverage.0.max(1) as f64 * 100.0
     );
+    if args.iter().any(|a| a == "--explore") {
+        explore(&mut data);
+        return;
+    }
     match export {
         Some(p) => export_coefficients(&data, &p),
         None => evaluate(&data, &classes),
@@ -106,16 +113,17 @@ fn main() {
 fn export_coefficients(data: &[(String, Vec<Runner>)], path: &str) {
     let all: Vec<&Vec<Runner>> = data.iter().map(|(_, r)| r).collect();
     let cols: Vec<usize> = ADOPTED.to_vec();
-    let m = fit(&all, true, &cols, 0.01);
-    let s = fit(&all, false, &cols, 0.01);
+    let m = fit(&all, true, &cols, L2);
+    let s = fit(&all, false, &cols, L2);
     let fmt = |v: &[f64]| v.iter().map(|x| format!("{:.6}", x)).collect::<Vec<_>>().join(", ");
     let src = format!(
         "//! jvmodel の係数（自動生成）。`cargo run --release --example jv_model -- <keiba.db> --export src/jv_coef.rs` で作り直す。\n\
-         //! 学習: 2021〜2025年の JRA 平地 {} レース、1着の多項ロジット、L2 0.01。\n\
+         //! 学習: 2021〜2025年の JRA 平地 {} レース、1着の多項ロジット、L2 {}。\n\
          pub const MARKET_GAMMA: f64 = {:.6};\n\
          pub const MARKET_BETA: [f64; {}] = [{}];\n\
          pub const SOLO_BETA: [f64; {}] = [{}];\n",
         all.len(),
+        L2,
         m[0],
         cols.len(),
         fmt(&m[1..]),
@@ -143,6 +151,57 @@ fn load_pedigree(path: &str) -> std::collections::HashMap<String, (String, Strin
         m.insert(f(12, 10), (sire, bms));
     }
     m
+}
+
+/// データを足さずに試せる改善: 正則化の強さ、市場の非線形、少数の交互作用・二乗項。
+/// 採用中（38特徴量, L2 0.01）との差を、同じ時系列ローリング検証で比べる。
+fn explore(data: &mut [(String, Vec<Runner>)]) {
+    let base_n = NAMES.len();
+    // 派生列を足す（index base_n..）: lm², lm×頭数, lm×指数最高3, 指数最高3², 着差², 着順率², 過去人気², 騎手勝率²
+    for (_, race) in data.iter_mut() {
+        let n = race.len() as f64;
+        for r in race.iter_mut() {
+            let lm = r.market.max(1e-9).ln();
+            let x = r.x.clone();
+            r.x.extend([lm * lm, lm * n / 10.0, lm * x[0], x[0] * x[0], x[6] * x[6], x[7] * x[7], x[8] * x[8], x[13] * x[13]]);
+        }
+    }
+    let base: Vec<usize> = (0..38).collect();
+    let with = |extra: &[usize]| -> Vec<usize> { base.iter().copied().chain(extra.iter().map(|e| base_n + e)).collect() };
+    let variants: Vec<(String, Vec<usize>, f64)> = vec![
+        ("旧 (L2 0.01)".into(), base.clone(), 0.01),
+        ("L2 0.001".into(), base.clone(), 0.001),
+        ("L2 0.003".into(), base.clone(), 0.003),
+        ("L2 0.03".into(), base.clone(), 0.03),
+        ("L2 0.1".into(), base.clone(), 0.1),
+        ("L2 0.2".into(), base.clone(), 0.2),
+        ("L2 0.3".into(), base.clone(), 0.3),
+        ("L2 0.5".into(), base.clone(), 0.5),
+        ("L2 1.0".into(), base.clone(), 1.0),
+        ("L2 0.3 +全部".into(), with(&[0, 1, 2, 3, 4, 5, 6, 7]), 0.3),
+        ("+市場の二乗".into(), with(&[0]), 0.01),
+        ("+市場×頭数".into(), with(&[1]), 0.01),
+        ("+市場×指数".into(), with(&[2]), 0.01),
+        ("+二乗項5つ".into(), with(&[3, 4, 5, 6, 7]), 0.01),
+        ("+全部".into(), with(&[0, 1, 2, 3, 4, 5, 6, 7]), 0.01),
+    ];
+    let folds = 8;
+    let per = data.len() / folds;
+    let mut pooled: Vec<Vec<f64>> = vec![Vec::new(); variants.len()];
+    for k in 4..folds {
+        let train: Vec<&Vec<Runner>> = data[..k * per].iter().map(|(_, r)| r).collect();
+        let test = &data[k * per..((k + 1) * per).min(data.len())];
+        for (vi, (_, cols, l2)) in variants.iter().enumerate() {
+            let b = fit(&train, true, cols, *l2);
+            pooled[vi].extend(test.iter().map(|(_, r)| loss(r, &race_probs(r, true, cols, &b))));
+        }
+        eprintln!("区間 {} 完了", k);
+    }
+    println!("\n[採用中との差（負なら良い, 95%区間）検証 {} レース]", pooled[0].len());
+    for vi in 1..variants.len() {
+        let (m, lo, hi) = paired_ci(&pooled[vi], &pooled[0]);
+        println!("  {:<18} {:+.4} [{:+.4}, {:+.4}]{}", variants[vi].0, m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
+    }
 }
 
 // ---- 当てはめと評価 ----
@@ -297,7 +356,7 @@ fn evaluate(data: &[(String, Vec<Runner>)], classes: &[f64]) {
         let mut line = format!("  {}〜 ({}R) 市場 {:.4}", test[0].0, test.len(), lm.iter().sum::<f64>() / lm.len() as f64);
         pooled[0].extend(lm);
         for (vi, (name, wm, cols)) in variants.iter().enumerate() {
-            let b = fit(&train, *wm, cols, 0.01);
+            let b = fit(&train, *wm, cols, L2);
             let ls: Vec<f64> = test.iter().map(|(_, r)| loss(r, &race_probs(r, *wm, cols, &b))).collect();
             if vi <= 2 {
                 line += &format!(" | {} {:.4}", name, ls.iter().sum::<f64>() / ls.len() as f64);

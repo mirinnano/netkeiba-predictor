@@ -24,6 +24,9 @@ fn main() {
         models::ComboOdds::default(),
         jv.as_ref(),
     );
+    if let Some(i) = args.iter().position(|a| a == "--json") {
+        std::fs::write(&args[i + 1], serde_json::to_string(&r).unwrap()).expect("書き込めません");
+    }
     println!("{} {} {} / モデル: {} / 確定: {}", r.race_info.date_str, r.race_info.race_name, r.race_info.source_url, r.model_source, r.race_info.is_finished);
     for p in r.predictions.iter().filter(|p| !p.entry.is_scratched).take(6) {
         println!(
@@ -32,4 +35,14 @@ fn main() {
         );
     }
     println!("  買い目 {} 点 / {} 円", r.recommendations.len(), r.total_bet);
+    println!(
+        "  指数の重み（自動）: {}",
+        r.factor_shares.iter().map(|f| format!("{} {:.0}%", f.name, f.share * 100.0)).collect::<Vec<_>>().join(" / ")
+    );
+    if let Some(p) = r.predictions.iter().find(|p| p.rank_order == 1) {
+        println!(
+            "  1位 {}: 能力 {} 時計 {} 適性 {} 騎手 {} 展開 {} 調教 {:?}",
+            p.entry.horse_name, p.ability_score, p.speed_score, p.aptitude_score, p.jockey_frame_score, p.pace_score, p.training_score
+        );
+    }
 }
