@@ -151,6 +151,104 @@
   }
 }
 
+
+/* 的中の演出（まれにしか出ないので、ここだけは時間をかけてよい） */
+:root {
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+}
+.celebrate-backdrop {
+  animation: fade-in 200ms var(--ease-out);
+}
+.gate-door {
+  position: relative;
+  background:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.14) 0 6px, transparent 6px 34px),
+    #1d3fa8;
+  transition: transform 650ms var(--ease-drawer);
+}
+.gate-left {
+  border-right: 3px solid #f2c200;
+}
+.gate-right {
+  border-left: 3px solid #f2c200;
+}
+.gate-left.is-open {
+  transform: translateX(-101%);
+}
+.gate-right.is-open {
+  transform: translateX(101%);
+}
+.gate-label {
+  position: absolute;
+  right: 0.75rem;
+  top: 50%;
+  z-index: 1;
+  transform: translateY(-50%);
+  border-radius: 6px;
+  background: #f2c200;
+  padding: 2px 10px;
+  font-weight: 900;
+  font-size: 28px;
+  color: #16181d;
+}
+.finish-sweep {
+  transform: translateX(-100%);
+  animation: finish-sweep 700ms var(--ease-in-out) 1000ms forwards;
+}
+@keyframes finish-sweep {
+  to {
+    transform: translateX(200%);
+  }
+}
+/* ゴール板は線が抜ける間だけ見せる */
+.finish-post {
+  opacity: 0;
+  animation: post-flash 1400ms var(--ease-out) 700ms forwards;
+}
+@keyframes post-flash {
+  20%,
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.celebrate-rank {
+  opacity: 0;
+  transform: translateY(10px) scale(0.95);
+  transition:
+    opacity 260ms var(--ease-out),
+    transform 260ms var(--ease-out);
+}
+.celebrate-rank.is-in {
+  opacity: 1;
+  transform: none;
+}
+.celebrate-hits {
+  opacity: 0;
+  transition: opacity 300ms var(--ease-out) 900ms;
+}
+.celebrate-hits.is-in {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .gate-door {
+    transition: opacity 300ms ease;
+  }
+  .gate-left.is-open,
+  .gate-right.is-open {
+    transform: none;
+    opacity: 0;
+  }
+  .finish-sweep {
+    display: none;
+  }
+  .celebrate-rank {
+    transform: none;
+  }
+}
+
 /* スマホ幅: 横にはみ出した要素でページ全体が横に広がらないようにする（表は各自の横スクロールで見る） */
 @media (max-width: 767px) {
   html,

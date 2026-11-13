@@ -328,6 +328,16 @@ async fn verify_saved_race_result(
     db::save_prediction(&db_path, updated)
 }
 
+/// 払戻が出ていれば、いま表示している買い目に当てはめて返す。まだなら None（発走後に短い間隔で呼ぶ）
+#[tauri::command]
+async fn check_payouts(current_result: RacePredictionResult) -> Result<Option<RacePredictionResult>, String> {
+    let (rows, payouts) = scraper::fetch_race_result(&current_result.race_info.race_id).await?;
+    if rows.is_empty() || payouts.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(predictor::apply_official_result(current_result, &rows, payouts)))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -358,6 +368,7 @@ pub fn run() {
             delete_prediction_record,
             get_roi_dashboard,
             verify_saved_race_result,
+            check_payouts,
             jv_status,
             jv_import,
         ])

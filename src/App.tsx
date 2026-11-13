@@ -18,6 +18,7 @@ import { DEFAULT_WEIGHTS } from "./components/WeightsPanel";
 import { postTime, recommendedKey } from "./lib/format";
 import { JvDataPanel } from "./components/JvDataPanel";
 import { TodayView } from "./components/TodayView";
+import { WinCelebration } from "./components/WinCelebration";
 
 type Tab = "today" | "race" | "browser" | "bets" | "history";
 
@@ -59,6 +60,7 @@ export default function App() {
   const [oddsAt, setOddsAt] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [now, setNow] = useState(() => new Date());
+  const [celebrate, setCelebrate] = useState<RacePredictionResult | null>(null);
 
   const [toastShown, setToastShown] = useState(false);
   const toastMsg = useRef<string | null>(null);
@@ -203,6 +205,37 @@ export default function App() {
   const post = prediction ? postTime(prediction.race_info.date_str, prediction.race_info.start_time) : null;
   const minutesToPost = post ? Math.round((post.getTime() - now.getTime()) / 60000) : null;
   const autoRefresh = !!prediction && !prediction.race_info.is_finished && minutesToPost !== null && minutesToPost <= 20 && minutesToPost >= -2;
+  // 払戻速報: 発走 1 分後から 45 分後まで、20 秒ごとに結果ページを見に行く。出たらすぐ当てはめる
+  const watchPayouts = !!prediction && !prediction.race_info.is_finished && minutesToPost !== null && minutesToPost <= -1 && minutesToPost >= -45;
+  const checking = useRef(false);
+  const latest = useRef(prediction);
+  latest.current = prediction;
+  useEffect(() => {
+    if (!watchPayouts) return;
+    const check = async () => {
+      if (checking.current) return;
+      checking.current = true;
+      try {
+        const current = latest.current;
+        if (!current || current.race_info.is_finished) return;
+        const done = await invoke<RacePredictionResult | null>("check_payouts", { currentResult: current });
+        if (!done) return;
+        const saved = current.saved_at ? await invoke<RacePredictionResult>("save_prediction_record", { result: done }).catch(() => done) : done;
+        setPrediction(saved);
+        if ((saved.total_return ?? 0) > 0) setCelebrate(saved);
+        else showToast("払戻が出ました。今回は外れです");
+      } catch {
+        /* 通信できないときは次の回に任せる */
+      } finally {
+        checking.current = false;
+      }
+    };
+    check();
+    const id = window.setInterval(check, 20000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchPayouts, prediction?.race_info.race_id]);
+
   useEffect(() => {
     const id = window.setInterval(() => setNow(new Date()), 30000);
     return () => window.clearInterval(id);
@@ -466,6 +499,8 @@ export default function App() {
         </span>
         {TABS.map((t) => renderTab(t, true))}
       </nav>
+
+      {celebrate && <WinCelebration result={celebrate} onClose={() => setCelebrate(null)} />}
 
       {toast && (
         <div
