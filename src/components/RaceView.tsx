@@ -25,6 +25,7 @@ export function RaceView({
   memo,
   onMemo,
   onMyBets,
+  mySave,
 }: {
   result: RacePredictionResult;
   budget: number;
@@ -41,6 +42,7 @@ export function RaceView({
   busy: boolean;
   memo: string;
   onMyBets: (bets: BetRecommendation[]) => void;
+  mySave: "idle" | "saving" | "saved" | "error";
   onMemo: (m: string) => void;
 }) {
   const [selected, setSelected] = useState<number | null>(null);
@@ -260,6 +262,7 @@ export function RaceView({
             memo={memo}
             onMemo={onMemo}
             onMyBets={onMyBets}
+            mySave={mySave}
           />
         </div>
       </div>

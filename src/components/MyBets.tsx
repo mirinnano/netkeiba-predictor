@@ -62,10 +62,12 @@ export function MyBets({
   result,
   wakuOf,
   onChange,
+  saveState = "idle",
 }: {
   result: RacePredictionResult;
   wakuOf: (u: number) => number;
   onChange: (bets: BetRecommendation[]) => void;
+  saveState?: "idle" | "saving" | "saved" | "error";
 }) {
   const bets = result.my_bets ?? [];
   const finished = result.race_info.is_finished;
@@ -136,7 +138,15 @@ export function MyBets({
   return (
     <section className="rounded-md border-2 border-mine" aria-label="自分の馬券">
       <div className="flex items-baseline justify-between bg-mine-tint px-3 py-2">
-        <h3 className="text-[14px] font-black text-mine">自分の馬券</h3>
+        <h3 className="flex items-baseline gap-2 text-[14px] font-black text-mine">
+          自分の馬券
+          <span
+            role="status"
+            className={`text-[11px] font-bold ${saveState === "error" ? "text-mark" : "text-ink-muted"}`}
+          >
+            {saveState === "saving" ? "保存中…" : saveState === "saved" ? "保存済み" : saveState === "error" ? "保存できません" : ""}
+          </span>
+        </h3>
         <span className="num text-[22px] font-bold leading-none text-mine">
           {yen(bet)}
           {finished && <span className={`ml-2 text-[15px] ${ret >= bet ? "text-hit" : "text-ink-muted"}`}>→ {yen(ret)}</span>}

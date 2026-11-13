@@ -43,6 +43,7 @@ export function TicketPanel({
   memo,
   onMemo,
   onMyBets,
+  mySave,
 }: {
   result: RacePredictionResult;
   wakuOf: (umaban: number) => number;
@@ -55,6 +56,7 @@ export function TicketPanel({
   memo: string;
   onMemo: (m: string) => void;
   onMyBets: (bets: BetRecommendation[]) => void;
+  mySave: "idle" | "saving" | "saved" | "error";
 }) {
   const recs = result.recommendations.filter((r) => r.suggested_amount > 0);
   const picks = recs.filter((r) => r.recommended);
@@ -106,7 +108,7 @@ export function TicketPanel({
       <div className="px-4 pt-3">
         <TicketSetView result={result} />
         <div className="mt-2">
-          <MyBets result={result} wakuOf={wakuOf} onChange={onMyBets} />
+          <MyBets result={result} wakuOf={wakuOf} onChange={onMyBets} saveState={mySave} />
         </div>
       </div>
       <div className="space-y-2 px-4 pt-2">

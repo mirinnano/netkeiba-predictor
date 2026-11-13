@@ -69,6 +69,21 @@ export default function App() {
   // 再計算は連続で呼ばれるので、最後に投げたものだけを反映する
   const recalcSeq = useRef(0);
 
+  // 自分の馬券の最新版。オッズ更新や再計算は送った時点の予想を元に結果を返すので、
+  // 待っているあいだに編集した馬券で上書きし直す（そうしないと編集が巻き戻る）
+  const mine = useRef<{ raceId: string; bets: BetRecommendation[] } | null>(null);
+  if (prediction && mine.current?.raceId !== prediction.race_info.race_id) {
+    mine.current = { raceId: prediction.race_info.race_id, bets: prediction.my_bets ?? [] };
+  }
+  const keepMine = (u: RacePredictionResult): RacePredictionResult => {
+    const m = mine.current;
+    if (!m || m.raceId !== u.race_info.race_id || u.race_info.is_finished) return u;
+    return { ...u, my_bets: m.bets };
+  };
+  const [mySave, setMySave] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  // 別のレースを開いたら、保存の表示は消す
+  useEffect(() => setMySave("idle"), [prediction?.race_info.race_id]);
+
   // オッズを最後に取った時刻と、取り直し中か
   const [oddsAt, setOddsAt] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -199,7 +214,7 @@ export default function App() {
         strategy,
         memo,
       });
-      setPrediction(updated);
+      setPrediction(keepMine(updated));
       setOddsAt(new Date());
       const after = recommendedKey(updated);
       if (before !== after) {
@@ -301,7 +316,7 @@ export default function App() {
         strategy: s,
         memo,
       });
-      if (seq === recalcSeq.current) setPrediction(updated);
+      if (seq === recalcSeq.current) setPrediction(keepMine(updated));
     } catch (e) {
       setError(String(e));
     }
@@ -311,6 +326,7 @@ export default function App() {
   const myBetsSeq = useRef(0);
   const setMyBets = (bets: BetRecommendation[]) => {
     if (!prediction) return;
+    mine.current = { raceId: prediction.race_info.race_id, bets };
     const next = { ...prediction, my_bets: bets };
     setPrediction(next);
     try {
@@ -320,15 +336,23 @@ export default function App() {
     }
     if (bets.length > 0) ensureNotifyPermission();
     const seq = ++myBetsSeq.current;
+    // 消して空にしたときも、保存済みなら空で書き戻す（古い馬券が残らないように）
+    if (bets.length === 0 && !prediction.saved_at) {
+      setMySave("idle");
+      return;
+    }
+    setMySave("saving");
     window.setTimeout(async () => {
-      if (seq !== myBetsSeq.current || bets.length === 0) return;
+      if (seq !== myBetsSeq.current) return;
       try {
         const saved = await invoke<RacePredictionResult>("save_prediction_record", { result: { ...next, memo } });
         setPrediction((p) => (p && p.race_info.race_id === saved.race_info.race_id ? { ...p, saved_at: saved.saved_at } : p));
-      } catch {
-        /* 保存できなくても端末には覚えている */
+        if (seq === myBetsSeq.current) setMySave("saved");
+      } catch (e) {
+        if (seq === myBetsSeq.current) setMySave("error");
+        showToast(`自分の馬券を保存できませんでした（${String(e)}）`);
       }
-    }, 800);
+    }, 600);
   };
   const withRememberedBets = (r: RacePredictionResult): RacePredictionResult => {
     if (r.my_bets && r.my_bets.length > 0) return r;
@@ -528,6 +552,7 @@ export default function App() {
             memo={memo}
             onMemo={setMemo}
             onMyBets={setMyBets}
+            mySave={mySave}
           />
         )}
         {tab === "bets" && prediction && <BetsView result={prediction} />}
