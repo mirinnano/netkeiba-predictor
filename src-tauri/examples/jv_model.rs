@@ -11,7 +11,7 @@ use netkeiba_predictor_lib::jvdata::JvRace;
 use netkeiba_predictor_lib::jvmodel::{card_from_jv, started, Engine, ADOPTED, NAMES};
 use netkeiba_predictor_lib::jvstore;
 
-const GROUPS: [(&str, &[usize]); 10] = [
+const GROUPS: [(&str, &[usize]); 11] = [
     ("時計", &[0, 1, 2]),
     ("上がり・展開", &[3, 4, 5]),
     ("着順・着差", &[6, 7, 9]),
@@ -22,6 +22,7 @@ const GROUPS: [(&str, &[usize]); 10] = [
     ("その他", &[20, 24, 25, 26, 27]),
     ("調教", &[30, 31, 32, 33, 34, 35, 36, 37]),
     ("調教(詳細)", &[38, 39, 40, 41, 42]),
+    ("血統", &[43, 44, 45, 46]),
 ];
 
 struct Runner {
@@ -42,9 +43,15 @@ fn main() {
     races.sort_by(|a, b| (&a.date, &a.race_id).cmp(&(&b.date, &b.race_id)));
     let works = jvstore::load_works(&conn).expect("調教を読めません");
     let mut engine = Engine::new(&races, works);
+    if let Some(um) = args.iter().position(|a| a == "--um").and_then(|i| args.get(i + 1)) {
+        let ped = load_pedigree(um);
+        println!("血統 {} 頭", ped.len());
+        engine.set_pedigree(ped);
+    }
     println!("{}", engine.summary());
 
     let mut data: Vec<(String, Vec<Runner>)> = Vec::new();
+    let mut classes: Vec<f64> = Vec::new();
     let mut coverage = (0usize, 0usize);
     let mut i = 0;
     while i < races.len() {
@@ -68,6 +75,7 @@ fn main() {
                 }
             }
             let x = engine.features(&card);
+            classes.push(card.class);
             let inv: Vec<f64> = st.iter().map(|h| 1.0 / h.win_odds.unwrap()).collect();
             let s: f64 = inv.iter().sum();
             data.push((
@@ -90,7 +98,7 @@ fn main() {
     );
     match export {
         Some(p) => export_coefficients(&data, &p),
-        None => evaluate(&data),
+        None => evaluate(&data, &classes),
     }
 }
 
@@ -116,6 +124,25 @@ fn export_coefficients(data: &[(String, Vec<Runner>)], path: &str) {
     );
     std::fs::write(path, src).expect("書き込めません");
     println!("係数を書き出しました: {}（γ={:.3}）", path, m[0]);
+}
+
+/// JV-Data の UM（競走馬マスタ）から 馬 → (父, 母父) を読む。父は 205 バイト目、母父は 389 バイト目（各10桁）
+fn load_pedigree(path: &str) -> std::collections::HashMap<String, (String, String)> {
+    let bytes = std::fs::read(path).expect("UM を読めません");
+    let mut m = std::collections::HashMap::new();
+    for line in bytes.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.len() < 398 || &line[0..2] != b"UM" {
+            continue;
+        }
+        let f = |p: usize, n: usize| String::from_utf8_lossy(&line[p - 1..p - 1 + n]).trim().to_string();
+        let (sire, bms) = (f(205, 10), f(389, 10));
+        if sire.chars().all(|c| c == '0') {
+            continue;
+        }
+        m.insert(f(12, 10), (sire, bms));
+    }
+    m
 }
 
 // ---- 当てはめと評価 ----
@@ -242,20 +269,22 @@ fn paired_ci(a: &[f64], b: &[f64]) -> (f64, f64, f64) {
     (mean, ms[50], ms[1949])
 }
 
-fn evaluate(data: &[(String, Vec<Runner>)]) {
+fn evaluate(data: &[(String, Vec<Runner>)], classes: &[f64]) {
     let all: Vec<usize> = (0..NAMES.len()).collect();
     let mut variants: Vec<(String, bool, Vec<usize>)> = vec![
         ("市場(γ補正)".into(), true, vec![]),
         ("モデルのみ(市場なし)".into(), false, all.clone()),
         // 採用している 38 特徴量（調教の詳細 5 つは検証で悪化したので外す）
         ("市場+全特徴量".into(), true, (0..38).collect()),
-        ("市場+全特徴量+調教詳細".into(), true, all.clone()),
+        ("市場+全特徴量+調教詳細".into(), true, (0..43).collect()),
+        ("市場+全特徴量+血統".into(), true, (0..38).chain(43..47).collect()),
     ];
     for (g, cols) in GROUPS {
         variants.push((format!("市場+{}", g), true, cols.to_vec()));
     }
     let folds = 8;
     let per = data.len() / folds;
+    let test_from = 4 * per;
     let mut pooled: Vec<Vec<f64>> = vec![Vec::new(); variants.len() + 1];
     let mut coefs: Vec<Vec<f64>> = Vec::new();
     const TH: [f64; 4] = [0.8, 0.9, 1.0, 1.1];
@@ -305,6 +334,8 @@ fn evaluate(data: &[(String, Vec<Runner>)]) {
         // pooled[0]=市場, [1]=市場(γ補正), [2]=モデルのみ, [3]=市場+全特徴量, [4]=+調教詳細
         let (m, lo, hi) = paired_ci(&pooled[4], &pooled[3]);
         println!("  調教詳細の上積み = (+調教詳細) − 全特徴量: {:+.4} [{:+.4}, {:+.4}]{}", m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
+        let (m, lo, hi) = paired_ci(&pooled[5], &pooled[3]);
+        println!("  血統の上積み = (+血統) − 全特徴量: {:+.4} [{:+.4}, {:+.4}]{}", m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
     }
     println!("\n[市場+全特徴量の係数（区間ごと。符号が揃うものが本物）]");
     println!("  {:<12} {}", "log(市場)", coefs.iter().map(|b| format!("{:+.3}", b[0])).collect::<Vec<_>>().join(" "));
@@ -314,6 +345,19 @@ fn evaluate(data: &[(String, Vec<Runner>)]) {
         let v: Vec<f64> = coefs.iter().map(|b| b[j + 1]).collect();
         let same = v.iter().all(|x| *x > 0.0) || v.iter().all(|x| *x < 0.0);
         println!("  {:<12} {}{}", name, v.iter().map(|x| format!("{:+.3}", x)).collect::<Vec<_>>().join(" "), if same { "  ✓" } else { "" });
+    }
+    // クラス別: 検証区間のレースをクラスで分け、採用モデルと γ補正市場を比べる
+    println!("\n[クラス別の比較: 市場+全特徴量 − 市場(γ補正)（負なら良い, 95%区間）]");
+    let segs: [(&str, f64, f64); 4] = [("条件戦(新馬〜3勝)", -1.0, 3.5), ("OP・L", 3.5, 4.9), ("GIII", 4.9, 5.5), ("GI・GII", 5.5, 9.0)];
+    let n_test = pooled[1].len();
+    for (name, lo_c, hi_c) in segs {
+        let idx: Vec<usize> = (0..n_test).filter(|&i| { let c = classes[test_from + i]; c > lo_c && c <= hi_c }).collect();
+        if idx.is_empty() { continue; }
+        let a: Vec<f64> = idx.iter().map(|&i| pooled[3][i]).collect();
+        let b: Vec<f64> = idx.iter().map(|&i| pooled[1][i]).collect();
+        let mk: Vec<f64> = idx.iter().map(|&i| pooled[0][i]).collect();
+        let (m, lo, hi) = paired_ci(&a, &b);
+        println!("  {:<18} {:>5}R 市場 {:.4} 差 {:+.4} [{:+.4}, {:+.4}]{}", name, idx.len(), avg(&mk), m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
     }
     println!("\n[単勝の回収率（市場+全特徴量, 検証区間, 確定オッズ）]");
     for (ti, t) in TH.iter().enumerate() {

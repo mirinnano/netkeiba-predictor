@@ -8,13 +8,14 @@ use crate::jvdata::{JvRace, JvRunner, JvWork};
 use chrono::Datelike;
 use std::collections::HashMap;
 
-pub const NAMES: [&str; 43] = [
+pub const NAMES: [&str; 47] = [
     "指数最高3", "指数平均3", "指数前走", "上がり順位", "展開不利", "4角から挽回", "着差", "着順率", "過去人気",
     "人気以上", "クラス変化", "騎手3着内", "調教師3着内", "騎手勝率", "間隔", "距離変更", "芝ダ替わり", "斤量差",
     "馬体重増減", "馬体重", "馬齢", "出走数", "ブリンカー", "初ブリンカー", "馬番位置", "脚質", "同場3着内", "同距離3着内",
     "乗り替わり", "騎手の格上げ",
     "坂路4F", "坂路ラスト1F", "坂路本数", "ウッド4F", "ウッドラスト1F", "ウッド本数", "最終追切からの日数", "最終追切ラスト1F",
     "最終追切の加速", "自己比ラスト1F", "併せ馬", "28日本数", "最終が坂路",
+    "父の同条件", "母父の同条件", "父の馬場適性", "父×未経験条件",
 ];
 
 /// 採用している特徴量（調教の詳細 38〜42 は検証で悪化したので使わない）
@@ -173,6 +174,20 @@ pub struct Engine {
     going_adj: HashMap<String, f64>,
     pace_std: HashMap<String, f64>,
     work_std: HashMap<(bool, u8, u8), (f64, f64)>,
+    /// 血統（馬 → (父, 母父) の繁殖登録番号）。なければ血統の特徴量は欠け（NaN）
+    pedigree: HashMap<String, (String, String)>,
+    /// 父・母父ごとの産駒成績。キーは (種牡馬, 馬場, 距離帯)。馬場・距離帯が空のものは全体
+    sire_stat: HashMap<(String, String, u8), Stat>,
+}
+
+/// 距離帯: 〜1400 / 〜1800 / 〜2200 / それ以上
+fn dist_band(d: u32) -> u8 {
+    match d {
+        0..=1400 => 1,
+        1401..=1800 => 2,
+        1801..=2200 => 3,
+        _ => 4,
+    }
 }
 
 impl Engine {
@@ -243,7 +258,7 @@ impl Engine {
             .filter(|(_, (a, b))| a.len() >= 100 && b.len() >= 100)
             .map(|(k, (mut a, mut b))| (k, (median(&mut a), median(&mut b))))
             .collect();
-        Engine { hist: HashMap::new(), jockey: HashMap::new(), trainer: HashMap::new(), works: wm, std_t, going_adj, pace_std, work_std }
+        Engine { hist: HashMap::new(), jockey: HashMap::new(), trainer: HashMap::new(), works: wm, std_t, going_adj, pace_std, work_std, pedigree: HashMap::new(), sire_stat: HashMap::new() }
     }
 
     pub fn summary(&self) -> String {
@@ -255,6 +270,11 @@ impl Engine {
             self.work_std.len(),
             self.hist.len()
         )
+    }
+
+    /// 血統を設定する（馬 → (父, 母父)）。履歴を足す前に呼ぶ
+    pub fn set_pedigree(&mut self, pedigree: HashMap<String, (String, String)>) {
+        self.pedigree = pedigree;
     }
 
     /// その馬に過去走があるか
@@ -308,6 +328,16 @@ impl Engine {
                     e.n += 1.0;
                     e.win += w;
                     e.top3 += t;
+                }
+                if let Some((sire, bms)) = self.pedigree.get(&h.horse_id) {
+                    for anc in [format!("S{}", sire), format!("B{}", bms)] {
+                        for key in [(anc.clone(), r.surface.clone(), dist_band(r.distance)), (anc.clone(), r.surface.clone(), 0), (anc.clone(), String::new(), 0)] {
+                            let e = self.sire_stat.entry(key).or_default();
+                            e.n += 1.0;
+                            e.win += w;
+                            e.top3 += t;
+                        }
+                    }
                 }
             }
         }
@@ -423,6 +453,26 @@ impl Engine {
                 let from28 = ymd_days(dnum) - 28;
                 row.push(all_w.iter().filter(|w| w.date < dnum && ymd_days(w.date) >= from28).count() as f64);
                 row.push(lastw.map(|w| if w.slope { 1.0 } else { 0.0 }).unwrap_or(f64::NAN));
+                // 血統: 父・母父の産駒の、同じ馬場・距離帯での3着内率（前日までの成績）
+                let band = dist_band(card.distance);
+                let rate = |anc: &str, surf: &str, b: u8| -> f64 {
+                    match self.sire_stat.get(&(anc.to_string(), surf.to_string(), b)) {
+                        Some(st) if st.n > 0.0 => logit_rate(st.top3, st.n, 0.21, 30.0),
+                        _ => f64::NAN,
+                    }
+                };
+                match self.pedigree.get(&h.horse_id) {
+                    Some((sire, bms)) => {
+                        let (s, b) = (format!("S{}", sire), format!("B{}", bms));
+                        let same = rate(&s, &card.surface, band);
+                        row.push(same);
+                        row.push(rate(&b, &card.surface, band));
+                        row.push(rate(&s, &card.surface, 0) - rate(&s, "", 0));
+                        let tried = past.iter().any(|x| x.surface == card.surface && dist_band(x.distance) == band);
+                        row.push(if tried { 0.0 } else { same - rate(&s, "", 0) });
+                    }
+                    None => row.extend([f64::NAN; 4]),
+                }
                 row
             })
             .collect()
