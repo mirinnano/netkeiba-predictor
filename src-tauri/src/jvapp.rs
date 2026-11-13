@@ -19,6 +19,10 @@ use std::time::SystemTime;
 #[cfg(target_os = "android")]
 pub fn import_pushed_db(app_data: &Path) {
     let src = PathBuf::from("/storage/emulated/0/Android/data/com.keibascope.predictor/files/keiba.db");
+    // 受け取り口のフォルダはアプリ自身で作っておく。adb が先に作るとアプリから読めない持ち主になる
+    if let Some(dir) = src.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     if !src.exists() {
         return;
     }
