@@ -226,10 +226,11 @@ internal static class JvDump
                     }
                     WriteRecord(w, bytes, r);
                     records++;
-                    if (until != null && bytes.Length >= 19)
+                    // 日付の位置: レース系は開催年月日（12〜19 バイト目）、調教（HC・WC）は調教年月日（13〜20 バイト目）
+                    int dpos = (spec == "HC" || spec == "WC") ? 12 : 11;
+                    if (until != null && bytes.Length >= dpos + 8)
                     {
-                        // 開催年月日（12〜19 バイト目、ASCII）
-                        string d = Encoding.ASCII.GetString(bytes, 11, 8);
+                        string d = Encoding.ASCII.GetString(bytes, dpos, 8);
                         if (d.Length == 8 && char.IsDigit(d[0]) && d.CompareTo("19000101") > 0 && (fileMin == null || d.CompareTo(fileMin) < 0))
                         {
                             fileMin = d;

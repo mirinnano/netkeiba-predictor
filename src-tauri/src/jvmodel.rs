@@ -191,9 +191,12 @@ fn dist_band(d: u32) -> u8 {
 }
 
 impl Engine {
-    /// `base_races` は基準タイム・ペースを作るための 2021年のレース、`works` は調教（基準は 2021年分で作る）
+    /// 基準タイム・ペースは、渡されたレースのうち最初の年のものだけで作る（2021年から読めば 2021年、2011年から読めば 2011年）。
+    /// 調教の基準も、調教データの最初の年の分だけで作る。評価する年より後の情報が基準に混ざらないようにするため
     pub fn new(base_races: &[JvRace], works: HashMap<String, Vec<JvWork>>) -> Self {
-        let base: Vec<&JvRace> = base_races.iter().filter(|r| r.date.as_str() < "20220101" && r.surface != "障" && r.kubun == '7').collect();
+        let first_year = base_races.iter().filter(|r| r.kubun == '7').map(|r| r.date.get(0..4).unwrap_or("9999")).min().unwrap_or("2021").to_string();
+        let race_cut = format!("{}0101", first_year.parse::<u32>().unwrap_or(2021) + 1);
+        let base: Vec<&JvRace> = base_races.iter().filter(|r| r.date.as_str() < race_cut.as_str() && r.surface != "障" && r.kubun == '7').collect();
         let mut tv: HashMap<String, Vec<f64>> = HashMap::new();
         let mut pv: HashMap<String, Vec<f64>> = HashMap::new();
         for r in &base {
@@ -237,11 +240,13 @@ impl Engine {
                 *slots.entry((w.slope, w.center, w.course, w.date, w.time)).or_default() += 1;
             }
         }
+        let work_first = wm.values().flat_map(|v| v.iter().map(|w| w.date / 10000)).min().unwrap_or(2021);
+        let work_cut = (work_first + 1) * 10000 + 101;
         let mut wv: HashMap<(bool, u8, u8), (Vec<f64>, Vec<f64>)> = HashMap::new();
         for v in wm.values_mut() {
             for w in v.iter_mut() {
                 w.partners = slots.get(&(w.slope, w.center, w.course, w.date, w.time)).copied().unwrap_or(1) - 1;
-                if w.date < 20220101 {
+                if w.date < work_cut {
                     let e = wv.entry(work_key(w)).or_default();
                     if let Some(t) = w.t4 {
                         e.0.push(t);
