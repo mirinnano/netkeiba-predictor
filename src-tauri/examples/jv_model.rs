@@ -8,6 +8,7 @@
 //! - 日付順に1日ずつ処理し、その日の全レースの特徴量を作ってから、その日の結果を履歴に足す。
 //! - 基準タイム・ペース・調教の基準は 2021年のデータだけで作る（検証区間は 2023年以降）。
 use netkeiba_predictor_lib::jvdata::JvRace;
+use std::collections::HashMap;
 use netkeiba_predictor_lib::jvmodel::{card_from_jv, started, Engine, ADOPTED, NAMES};
 use netkeiba_predictor_lib::jvstore;
 
@@ -29,6 +30,7 @@ const GROUPS: [(&str, &[usize]); 11] = [
 const L2: f64 = 0.1;
 
 struct Runner {
+    umaban: u32,
     market: f64,
     odds: f64,
     win: bool,
@@ -55,6 +57,7 @@ fn main() {
 
     let mut data: Vec<(String, Vec<Runner>)> = Vec::new();
     let mut classes: Vec<f64> = Vec::new();
+    let mut race_ids: Vec<String> = Vec::new();
     let mut coverage = (0usize, 0usize);
     let mut i = 0;
     while i < races.len() {
@@ -79,13 +82,14 @@ fn main() {
             }
             let x = engine.features(&card);
             classes.push(card.class);
+            race_ids.push(r.race_id.clone());
             let inv: Vec<f64> = st.iter().map(|h| 1.0 / h.win_odds.unwrap()).collect();
             let s: f64 = inv.iter().sum();
             data.push((
                 day.clone(),
                 st.iter()
                     .enumerate()
-                    .map(|(a, h)| Runner { market: inv[a] / s, odds: h.win_odds.unwrap(), win: h.rank == Some(1), x: x[a].clone() })
+                    .map(|(a, h)| Runner { umaban: h.umaban, market: inv[a] / s, odds: h.win_odds.unwrap(), win: h.rank == Some(1), x: x[a].clone() })
                     .collect(),
             ));
         }
@@ -99,6 +103,10 @@ fn main() {
         coverage.0,
         coverage.1 as f64 / coverage.0.max(1) as f64 * 100.0
     );
+    if let Some(dir) = args.iter().position(|a| a == "--bets").and_then(|i| args.get(i + 1)) {
+        bets(&data, &classes, &race_ids, std::path::Path::new(path), std::path::Path::new(dir));
+        return;
+    }
     if args.iter().any(|a| a == "--explore") {
         explore(&mut data);
         return;
@@ -201,6 +209,165 @@ fn explore(data: &mut [(String, Vec<Runner>)]) {
     for vi in 1..variants.len() {
         let (m, lo, hi) = paired_ci(&pooled[vi], &pooled[0]);
         println!("  {:<18} {:+.4} [{:+.4}, {:+.4}]{}", variants[vi].0, m, lo, hi, if hi < 0.0 { "  ← 確かに良い" } else { "" });
+    }
+}
+
+// ---- アプリの買い目のバックテスト ----
+
+/// JV-Data のレコードから netkeiba 形式のレース ID（年・場・回・日・R）
+fn rec_race_id(b: &[u8]) -> String {
+    String::from_utf8_lossy(&b[11..15]).to_string() + &String::from_utf8_lossy(&b[19..27])
+}
+
+fn num(b: &[u8], p: usize, n: usize) -> Option<u64> {
+    std::str::from_utf8(&b[p - 1..p - 1 + n]).ok()?.trim().parse().ok()
+}
+
+/// RACE フォルダの HR（払戻）と O2・O3・O5（確定オッズ）を読む
+fn load_bet_data(dir: &std::path::Path) -> (HashMap<String, HashMap<(String, Vec<u32>), u64>>, HashMap<String, netkeiba_predictor_lib::models::ComboOdds>) {
+    let lines = |name: &str| -> Vec<Vec<u8>> {
+        std::fs::read(dir.join(name)).unwrap_or_default().split(|&c| c == b'\n').map(|l| l.strip_suffix(b"\r").unwrap_or(l).to_vec()).filter(|l| l.len() > 30).collect()
+    };
+    // 払戻: レコード長 717。単勝 103(13×3) 複勝 142(13×5) 馬連 246(16×3) ワイド 294(16×7) 3連複 550(18×3)
+    let mut pay: HashMap<String, (char, HashMap<(String, Vec<u32>), u64>)> = HashMap::new();
+    for b in lines("HR.txt") {
+        if b.len() < 717 {
+            continue;
+        }
+        let kubun = b[2] as char;
+        let mut m = HashMap::new();
+        let mut put = |kind: &str, start: usize, w: usize, cnt: usize, horses: usize| {
+            for i in 0..cnt {
+                let p = start + w * i;
+                let hs: Vec<u32> = (0..horses).filter_map(|h| num(&b, p + 2 * h, 2).map(|x| x as u32)).collect();
+                if let (true, Some(y)) = (hs.len() == horses && hs.iter().all(|x| *x > 0), num(&b, p + 2 * horses, 9)) {
+                    let mut k = hs.clone();
+                    k.sort_unstable();
+                    m.insert((kind.to_string(), k), y);
+                }
+            }
+        };
+        put("単勝", 103, 13, 3, 1);
+        put("馬連", 246, 16, 3, 2);
+        put("ワイド", 294, 16, 7, 2);
+        put("3連複", 550, 18, 3, 3);
+        let id = rec_race_id(&b);
+        if pay.get(&id).map(|(k, _)| kubun >= *k).unwrap_or(true) {
+            pay.insert(id, (kubun, m));
+        }
+    }
+    let mut odds: HashMap<String, netkeiba_predictor_lib::models::ComboOdds> = HashMap::new();
+    // オッズ: 41 バイト目から。馬連 13×153（組番4 オッズ6）、ワイド 17×153（組番4 最低5 最高5）、3連複 15×816（組番6 オッズ6）。オッズは 10 倍の整数
+    for (file, w, cnt, horses, olen) in [("O2.txt", 13, 153, 2, 6), ("O3.txt", 17, 153, 2, 5), ("O5.txt", 15, 816, 3, 6)] {
+        for b in lines(file) {
+            let e = odds.entry(rec_race_id(&b)).or_default();
+            for i in 0..cnt {
+                let p = 41 + w * i;
+                if p + w - 1 > b.len() {
+                    break;
+                }
+                let hs: Vec<u32> = (0..horses).filter_map(|h| num(&b, p + 2 * h, 2).map(|x| x as u32)).collect();
+                if hs.len() != horses || hs.iter().any(|x| *x == 0) {
+                    continue;
+                }
+                if let Some(o) = num(&b, p + 2 * horses, olen).filter(|o| *o > 0) {
+                    let key = netkeiba_predictor_lib::models::combo_key(&hs);
+                    let v = o as f64 / 10.0;
+                    match file {
+                        "O2.txt" => e.umaren.insert(key, v),
+                        "O3.txt" => e.wide.insert(key, v),
+                        _ => e.sanrenpuku.insert(key, v),
+                    };
+                }
+            }
+        }
+    }
+    (pay.into_iter().map(|(k, (_, m))| (k, m)).collect(), odds)
+}
+
+/// アプリと同じ買い目（予算 3000 円）を、検証区間の各レースで作り、公式の払戻で精算する。
+/// 勝率は、そのレースより前の区間だけで当てはめた「市場＋特徴量」モデル。オッズは確定オッズ（実際に買える締切前より有利な可能性がある）
+fn bets(data: &[(String, Vec<Runner>)], classes: &[f64], race_ids: &[String], db: &std::path::Path, dir: &std::path::Path) {
+    use netkeiba_predictor_lib::{jvapp, models, predictor};
+    let (pay, odds) = load_bet_data(dir);
+    println!("払戻 {} レース / オッズ {} レース", pay.len(), odds.len());
+    let cols: Vec<usize> = ADOPTED.to_vec();
+    let folds = 8;
+    let per = data.len() / folds;
+    let strategies = ["balance", "hit_focus", "value_focus"];
+    // (戦略, クラス区分, 券種, 賭け, 払戻) と、レースごとの (戦略, 区分, 賭け, 払戻)
+    let mut tickets: Vec<(usize, usize, String, f64, f64)> = Vec::new();
+    let mut races: Vec<(usize, usize, f64, f64)> = Vec::new();
+    let mut skipped = 0;
+    for k in 4..folds {
+        let train: Vec<&Vec<Runner>> = data[..k * per].iter().map(|(_, r)| r).collect();
+        let b = fit(&train, true, &cols, L2);
+        let end = ((k + 1) * per).min(data.len());
+        for idx in k * per..end {
+            let race = &data[idx].1;
+            let id = &race_ids[idx];
+            let (Some(p_map), Some(combo)) = (pay.get(id), odds.get(id)) else { skipped += 1; continue };
+            let Some((mut info, entries)) = jvapp::race_from_db(db, id) else { skipped += 1; continue };
+            info.is_finished = false;
+            let p = race_probs(race, true, &cols, &b);
+            let jv = models::JvModelOut { probs: race.iter().zip(&p).map(|(r, q)| (r.umaban, *q)).collect(), contrib: HashMap::new() };
+            let c = classes[idx];
+            let seg = if c < 3.5 { 0 } else if c < 4.9 { 1 } else { 2 };
+            for (si, st) in strategies.iter().enumerate() {
+                let res = predictor::run_prediction_with(
+                    info.clone(), entries.clone(), Vec::new(), models::ScoringWeights::default(), 3000, st.to_string(), String::new(), combo.clone(), Some(&jv),
+                );
+                let (mut rb, mut rr) = (0.0, 0.0);
+                for t in res.recommendations.iter().filter(|t| t.suggested_amount > 0) {
+                    let mut key = t.horses.clone();
+                    key.sort_unstable();
+                    let y = p_map.get(&(t.bet_type.clone(), key)).copied().unwrap_or(0) as f64;
+                    let ret = y * t.suggested_amount as f64 / 100.0;
+                    tickets.push((si, seg, t.bet_type.clone(), t.suggested_amount as f64, ret));
+                    rb += t.suggested_amount as f64;
+                    rr += ret;
+                }
+                races.push((si, seg, rb, rr));
+            }
+        }
+        eprintln!("区間 {} 完了", k);
+    }
+    println!("精算できなかったレース {}", skipped);
+    let ci = |v: &[(f64, f64)]| -> (f64, f64) {
+        let mut seed: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+        let mut rs: Vec<f64> = (0..2000).map(|_| {
+            let (mut b, mut r) = (0.0, 0.0);
+            for _ in 0..v.len() { let x = v[(next() % v.len() as u64) as usize]; b += x.0; r += x.1; }
+            r / b.max(1.0) * 100.0
+        }).collect();
+        rs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (rs[50], rs[1949])
+    };
+    for (si, st) in strategies.iter().enumerate() {
+        println!("\n[配分 {}（予算 3000 円/レース）]", st);
+        for (seg, name) in [(9usize, "全体"), (0, "条件戦"), (1, "OP・L"), (2, "重賞")] {
+            let v: Vec<(f64, f64)> = races.iter().filter(|x| x.0 == si && (seg == 9 || x.1 == seg) && x.2 > 0.0).map(|x| (x.2, x.3)).collect();
+            if v.is_empty() { continue; }
+            let (b, r): (f64, f64) = v.iter().fold((0.0, 0.0), |a, x| (a.0 + x.0, a.1 + x.1));
+            let hit = v.iter().filter(|x| x.1 > 0.0).count();
+            let plus = v.iter().filter(|x| x.1 > x.0).count();
+            let (lo, hi) = ci(&v);
+            let mut rets: Vec<f64> = v.iter().map(|x| x.1).collect();
+            rets.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            let top: f64 = rets.iter().take((v.len() / 20).max(1)).sum();
+            println!(
+                "  {:<6} {:>5} R  回収率 {:>6.1}% [{:.0}%, {:.0}%]  何か的中 {:>3.0}%  プラス収支 {:>3.0}%  払戻の {:.0}% が上位5%のレース",
+                name, v.len(), r / b * 100.0, lo, hi, hit as f64 / v.len() as f64 * 100.0, plus as f64 / v.len() as f64 * 100.0, top / r.max(1.0) * 100.0
+            );
+        }
+        for bt in ["単勝", "馬連", "ワイド", "3連複"] {
+            let v: Vec<&(usize, usize, String, f64, f64)> = tickets.iter().filter(|x| x.0 == si && x.2 == bt).collect();
+            if v.is_empty() { continue; }
+            let (b, r) = v.iter().fold((0.0, 0.0), |a, x| (a.0 + x.3, a.1 + x.4));
+            let hit = v.iter().filter(|x| x.4 > 0.0).count();
+            println!("    {:<4} {:>6} 点  回収率 {:>6.1}%  的中率 {:>4.1}%", bt, v.len(), r / b * 100.0, hit as f64 / v.len() as f64 * 100.0);
+        }
     }
 }
 
